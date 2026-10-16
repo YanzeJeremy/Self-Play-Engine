@@ -1,0 +1,28 @@
+# Long games: gemma-4-31b-it plays 10 games of copycat rock paper scissors over 100 rounds, greedy (temperature 0),
+# to see whether more evidence lets it find the pattern. Same as baseline_greedy.toml except rounds (10 -> 100),
+# games (20 -> 10) and max_tokens (2048 -> 4096, since notes grow with the history). From the repo root:
+#   bash scripts/eval.sh --config eval_configs/long100_greedy.toml --name long100-gemma31b-greedy --base_url http://c04-06:8000/v1
+model = "google/gemma-4-31b-it"
+push = false              # the default uploads the run to the Prime Intellect platform
+max_concurrent = 10
+
+[select]
+limit = 10                # the taskset is infinite, so the number of games must be set
+
+[client]                  # fallback endpoint for any seat that does not pin one
+type = "eval"
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"   # unset means "EMPTY", which a server without --api-key accepts
+
+[sampling]
+temperature = 0
+max_tokens = 4096
+
+[env]
+game = "copycat_rps"
+
+[env.game_config]         # every setting but the seed, which each task supplies
+rounds = 100
+
+[env.taskset]
+id = "self-play-verifiers"

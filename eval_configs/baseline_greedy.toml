@@ -1,0 +1,29 @@
+# Baseline: gemma-4-31b-it plays 20 ten-round games of copycat rock paper scissors, greedy (temperature 0), how evals run.
+# Same as smoke.toml except the number of games, the concurrency and the temperature. From the repo root,
+# with the vLLM server up (VLLM_API_KEY exported if the server was started with --api-key):
+#   bash scripts/eval.sh --config eval_configs/baseline_greedy.toml --name base-gemma31b-greedy
+#   bash scripts/eval.sh --config eval_configs/baseline_greedy.toml --name base-gemma31b-greedy --base_url http://<node>:8000/v1
+model = "google/gemma-4-31b-it"
+push = false              # the default uploads the run to the Prime Intellect platform
+max_concurrent = 10
+
+[select]
+limit = 20                # the taskset is infinite, so the number of games must be set
+
+[client]                  # fallback endpoint for any seat that does not pin one
+type = "eval"
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"   # unset means "EMPTY", which a server without --api-key accepts
+
+[sampling]
+temperature = 0
+max_tokens = 2048
+
+[env]
+game = "copycat_rps"
+
+[env.game_config]         # every setting but the seed, which each task supplies
+rounds = 10
+
+[env.taskset]
+id = "self-play-verifiers"
