@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from collections import Counter
 
 from self_play.chat_model import ChatModel, ScriptedChatModel
 from self_play.games import GAMES
@@ -164,7 +165,7 @@ def test_selection_keeps_both_calls_of_rounds_that_kept_winning(tmp_path):
     win, lose = BEATEN_BY[opening], {v: k for k, v in BEATEN_BY.items()}[opening]
     # rounds 1..8: win (round 1, chance: never kept), lose, win x5, lose
     run_dir = make_run(tmp_path=tmp_path, name="gen", rule="repeat_self", games=[[win, lose, win, win, win, win, win, lose]])
-    meta, data, stats = select(run_dir, out=tmp_path / "data", extra=("--window", "3", "--min_window", "2", "--thresholds", "0.6"))
+    meta, data, stats = select(run_dir, out=tmp_path / "data", extra=("--window", "3", "--min_window", "2", "--thresholds", "0.6", "--max_rule_share", "1.0"))
     rounds = sorted({m["round"] for m in meta})
     # round k (1-based) qualifies if won and >= 60% of rounds k..k+2 won, with at least 2 rounds left:
     # round 7's window (rounds 7-8: win, loss) is 50%
@@ -177,18 +178,57 @@ def test_selection_keeps_both_calls_of_rounds_that_kept_winning(tmp_path):
     assert stats["train_examples"] == len(data) == 8
 
 
-def test_selection_drops_unusable_calls_and_caps_rules(tmp_path):
+def test_selection_drops_unusable_calls(tmp_path):
     opening = HiddenRuleRPSGame(game_config={"seed": 0, "rounds": 1, "rule": "repeat_self"}).state["opening_move"]
     win = BEATEN_BY[opening]
-    # an unreadable move in round 3 falls back: that round's move cannot be an example, its thinking can
+    # an unreadable move in round 3 falls back: that round is not the model's move and never an example
     run_dir = make_run(tmp_path=tmp_path, name="gen", rule="repeat_self", games=[[win, win, None, win, win, win]])
-    meta, _, stats = select(run_dir, out=tmp_path / "data", extra=("--window", "1", "--min_window", "1", "--thresholds", "1.0"))
-    fallback_round = [m["call"] for m in meta if m["round"] == 3]
-    assert fallback_round == []  # round 3 was not won (the fallback move lost or drew) or its move is unusable
-    assert all(m["round"] >= 2 for m in meta)
-    capped = select(run_dir, out=tmp_path / "capped", extra=("--window", "1", "--min_window", "1", "--thresholds", "1.0",
-                                                              "--target_max", "4", "--max_rule_share", "0.5"))[2]
-    assert capped["train_examples"] == 2  # 50% of a 4-example target for the only rule
+    meta, _, stats = select(run_dir, out=tmp_path / "data",
+                            extra=("--window", "1", "--min_window", "1", "--thresholds", "1.0", "--max_rule_share", "1.0"))
+    assert sorted({m["round"] for m in meta}) == [2, 4, 5, 6]
+    assert all(m["strict"] for m in meta)
+    assert stats["train_by_rule"]["repeat_self"] == {"examples": 8, "unique_games": 1, "strict_examples": 8, "share": 1.0}
+
+
+def winning_games(*, rule, n, rounds=6):
+    """n games that win every round against `rule` (the move that beats what the rule plays)."""
+    games = []
+    for seed in range(n):
+        game = HiddenRuleRPSGame(game_config={"seed": seed, "rounds": rounds, "rule": rule})
+        moves = []
+        for _ in range(rounds):
+            move = BEATEN_BY[game.opponent_move()]
+            moves.append(move)
+            game.state["history"].append({"player": move, "opponent": game.opponent_move(), "winner": "player"})
+        games.append(moves)
+    return games
+
+
+def test_the_rule_share_is_enforced_on_the_final_dataset(tmp_path):
+    runs = {rule: make_run(tmp_path=tmp_path, name=f"gen-{rule}", rule=rule, games=winning_games(rule=rule, n=3))
+            for rule in ("counter_last", "beaten_by_last", "copy_two_back", "repeat_self", "cycle")}
+    args = ("--window", "1", "--min_window", "1", "--thresholds", "1.0", "--target_max", "40")
+    meta, data, stats = select(*runs.values(), out=tmp_path / "balanced", extra=args)
+    counts = Counter(m["rule"] for m in meta)
+    assert len(data) == 40 and set(counts.values()) == {8}  # every opponent, evenly; none trimmed away alphabetically
+    assert {r: v["examples"] for r, v in stats["train_by_rule"].items()} == dict(counts)  # reported = written
+    assert max(v["share"] for v in stats["train_by_rule"].values()) <= 0.35
+
+    alone = run("python", "scripts/expert_iteration/select_sft_data.py", "--runs", str(runs["repeat_self"]), "--out_dir",
+                str(tmp_path / "alone"), "--hard_min", "0", "--val_fraction", "0", "--target_min", "1", *args)
+    assert alone.returncode == 1 and "no train set satisfies --max_rule_share" in alone.stderr
+
+    lopsided = make_run(tmp_path=tmp_path, name="gen-cycle-big", rule="cycle", games=winning_games(rule="cycle", n=12))
+    meta, _, stats = select(runs["repeat_self"], runs["counter_last"], lopsided, out=tmp_path / "lopsided",
+                            extra=("--window", "1", "--min_window", "1", "--thresholds", "1.0", "--target_max", "1000"))
+    shares = Counter(m["rule"] for m in meta)
+    assert max(shares.values()) / sum(shares.values()) <= 0.35 + 1e-9 and stats["diversity_limited"]
+
+
+def test_random_play_pass_rates():
+    from expert_iteration.select_sft_data import random_pass_rate
+    assert abs(random_pass_rate(window=5, threshold=0.8) - 1 / 27) < 1e-9
+    assert abs(random_pass_rate(window=5, threshold=0.6) - 33 / 243) < 1e-9
 
 
 # --- export and SFT config -----------------------------------------------------------------------
@@ -239,7 +279,7 @@ def test_the_adapter_export_writes_prime_rls_adapter_format(tmp_path):
 def test_the_sft_config_passes_prime_rls_validation(tmp_path):
     opening = HiddenRuleRPSGame(game_config={"seed": 0, "rounds": 1, "rule": "repeat_self"}).state["opening_move"]
     run_dir = make_run(tmp_path=tmp_path, name="gen", rule="repeat_self", games=[[BEATEN_BY[opening]] * 6] * 4)
-    select(run_dir, out=tmp_path / "data", extra=("--thresholds", "0.6"))
+    select(run_dir, out=tmp_path / "data", extra=("--thresholds", "0.6", "--max_rule_share", "1.0"))
     result = run("python", "scripts/expert_iteration/make_sft_config.py", "--data_dir", str(tmp_path / "data"),
                  "--out", str(tmp_path / "sft.toml"), "--output_dir", str(tmp_path / "out"))
     assert result.returncode == 0, result.stderr
@@ -253,22 +293,92 @@ def test_the_sft_config_passes_prime_rls_validation(tmp_path):
 @pytest.mark.workflow
 def test_the_pipeline_runs_resumes_and_guards_its_settings(tmp_path):
     env = {"EI_NO_GPU": "1", "EI_ROOT": str(tmp_path), "EVAL_SCRIPT": "tests/stub_eval.sh", "EI_SFT_CMD": str(ROOT / "tests/stub_sft.sh")}
-    first = run("bash", "scripts/run_expert_iteration.sh", "--smoke", "true", "--name", "t", env=env)
-    assert first.returncode == 0, first.stdout[-3000:] + first.stderr[-2000:]
+    pipeline = lambda *args, **extra: run("bash", "scripts/run_expert_iteration.sh", "--smoke", "true", "--name", "t", *args,
+                                          env={**env, **extra})
     exp = tmp_path / "t-smoke"
+    calls = lambda: (exp / "sft/outputs/stub_sft_calls.log").read_text().splitlines()
+
+    # SFT crashes before its first checkpoint, then after one: retries restart clean, then resume
+    crashed = pipeline(STUB_SFT_CRASH="before_ckpt")
+    assert crashed.returncode == 1 and "SFT failed" in crashed.stdout
+    crashed = pipeline(STUB_SFT_CRASH="after_ckpt")
+    assert crashed.returncode == 1 and calls() == ["(fresh)", "--clean"]
+    first = pipeline()
+    assert first.returncode == 0, first.stdout[-3000:] + first.stderr[-2000:]
+    assert calls() == ["(fresh)", "--clean", "--resume"]
     for stage in ("generate", "select", "sft", "export", "evaluate", "summarize"):
-        assert (exp / "stages" / f"{stage}.done").exists()
+        assert (exp / "stages" / f"{stage}.done").exists() and (exp / "stages" / f"{stage}.params").exists()
     summary = json.loads((exp / "summary.json").read_text())
     assert [r["rule"] for r in summary["results"]][0] == "copy_last" and not any(r["problems"] for r in summary["results"])
-    assert summary["sft_arm"].startswith("sft-")
+    assert summary["sft_arm"].startswith("sft-") and list(summary["by_horizon"]) == ["4 rounds", "6 rounds"]
+    assert all(len(r["per_round_wins"]["base"]) == 6 for r in summary["by_horizon"]["6 rounds"])
 
-    again = run("bash", "scripts/run_expert_iteration.sh", "--smoke", "true", "--name", "t", env=env)
+    again = pipeline()
     assert again.returncode == 0 and "== stage" not in again.stdout  # nothing redone
 
-    changed = run("bash", "scripts/run_expert_iteration.sh", "--smoke", "true", "--name", "t", "--lr", "3e-4", env=env)
-    assert changed.returncode == 1 and "started with other settings" in changed.stdout
-
-    retrained = run("bash", "scripts/run_expert_iteration.sh", "--smoke", "true", "--name", "t", "--redo_from", "sft", env=env)
+    # a finished stage keeps its settings, unless it is redone
+    changed = pipeline("--lr", "3e-4")
+    assert changed.returncode == 1 and "finished stages were run with other settings" in changed.stdout and "sft: lr=" in changed.stdout
+    changed = pipeline("--eval_skip", "60000")  # (smoke mode fixes eval_games itself)
+    assert changed.returncode == 1 and "evaluate: eval_skip=" in changed.stdout
+    retrained = pipeline("--lr", "3e-4", "--redo_from", "sft")
     assert retrained.returncode == 0, retrained.stdout[-3000:]
+    assert "previous SFT folder is kept" in retrained.stdout and list(exp.glob("sft.replaced-*"))
+    assert calls() == ["(fresh)"]  # a fresh training folder: no resume, no clean
     new_arm = json.loads((exp / "summary.json").read_text())["sft_arm"]
     assert new_arm != summary["sft_arm"]  # a new adapter is evaluated afresh, under its own name
+    assert pipeline("--lr", "3e-4").returncode == 0
+
+
+def test_shared_key_value_layers_serve_the_trained_values(tmp_path, monkeypatch):
+    """Gemma 4's full-attention layers (5, 11, ...) have no v_proj: values are the k_proj output, so
+    training's k_proj LoRA update reaches the values too. vLLM loads k_proj into both the K and V slots
+    of its packed qkv_proj but applies LoRA per slot; this checks with vLLM's own loader and packing
+    that the exported adapter gives the V slot exactly the trained values."""
+    import torch
+    from torch.distributed.checkpoint import save
+    from vllm.lora.lora_model import LoRAModel
+    from vllm.lora.lora_weights import PackedLoRALayerWeights
+    from vllm.lora.peft_helper import PEFTHelper
+    import vllm.lora.lora_model as vllm_lora_model
+
+    monkeypatch.setattr(vllm_lora_model, "PIN_MEMORY", False)  # pinning needs a GPU; the loading logic does not
+    rank, alpha, hidden = 8, 16, 32
+    torch.manual_seed(0)
+    model, shapes = {}, {0: ("q_proj", "k_proj", "v_proj"), 5: ("q_proj", "k_proj")}  # layer 0 sliding, 5 full (k == v)
+    for layer, projections in shapes.items():
+        for proj in projections:
+            module = f"model.language_model.layers.{layer}.self_attn.{proj}"
+            model[f"{module}.lora_A.0"] = torch.randn(rank, hidden)
+            model[f"{module}.lora_B.0"] = torch.randn(24, rank)
+    save({"app": {"model": model}}, checkpoint_id=str(tmp_path / "ckpt"))
+    result = export(tmp_path / "ckpt", tmp_path / "adapter", rank)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / "adapter/source.json").read_text())["shared_kv_v_proj_copied_from_k_proj"] == [
+        "model.language_model.layers.5.self_attn.v_proj"]
+
+    helper = PEFTHelper.from_local_dir(str(tmp_path / "adapter"), max_position_embeddings=None)
+    lora_model = LoRAModel.from_local_checkpoint(
+        str(tmp_path / "adapter"), expected_lora_modules={"q_proj", "k_proj", "v_proj"}, peft_helper=helper,
+        device="cpu", dtype=torch.float32)
+
+    def served_slots(layer):  # what vLLM's model manager packs into this layer's qkv_proj
+        prefix = f"model.language_model.layers.{layer}.self_attn"
+        return PackedLoRALayerWeights.pack([lora_model.get_lora(f"{prefix}.{p}") for p in ("q_proj", "k_proj", "v_proj")]).optimize()
+
+    x = torch.randn(hidden)
+    w_k = torch.randn(24, hidden)  # the base k_proj, which vLLM loads into both the K and V slots
+    trained_key = w_k @ x + (alpha / rank) * model["model.language_model.layers.5.self_attn.k_proj.lora_B.0"] @ (
+        model["model.language_model.layers.5.self_attn.k_proj.lora_A.0"] @ x)
+    packed = served_slots(5)
+    served = lambda slot: w_k @ x + (packed.lora_b[slot] @ (packed.lora_a[slot] @ x) if packed.lora_b[slot] is not None else 0)
+    # bf16 storage of the adapter is the only difference
+    assert torch.allclose(served(1), trained_key, atol=0.5, rtol=0.02)  # keys
+    assert torch.allclose(served(2), trained_key, atol=0.5, rtol=0.02)  # values == keys, as in training
+    assert served_slots(0).lora_b[2] is not None  # sliding layers keep their own v_proj
+
+    # without the copy (what an export of k_proj alone gives) the served values miss the whole update
+    del lora_model.loras["model.language_model.layers.5.self_attn.v_proj"]
+    unfixed = served_slots(5)
+    assert unfixed.lora_b[2] is None
+    assert not torch.allclose(w_k @ x, trained_key, atol=0.5, rtol=0.02)

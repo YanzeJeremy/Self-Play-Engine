@@ -11,6 +11,14 @@ prime-rl's own adapter broadcast writes (FileSystemWeightSender + save_lora_conf
 bfloat16, and `adapter_config.json`. --ckpt may be a checkpoint dir, a step dir, or a run's
 output dir (the latest `step_*/trainer` below it is used). It refuses unless every adapted
 module has both matrices with shapes A [rank, in] and B [out, rank].
+
+Shared key/value projections (Gemma 4's `attention_k_eq_v` full-attention layers): there the
+model has a k_proj and no v_proj, and the values are the k_proj output, so in training the
+k_proj LoRA update changes both keys and values. vLLM packs q/k/v into one qkv_proj, loads the
+k_proj weights into both the K and V slots, but applies LoRA per slot, and leaves a missing
+v_proj adapter empty: the served values would lack the update. So for those layers (read from
+the base model's config, by vLLM's own rule) the k_proj adapter is also written as the v_proj
+adapter. source.json lists them.
 """
 
 import json
@@ -31,6 +39,38 @@ def find_checkpoint(*, path: Path) -> Path:
         raise SystemExit(f"Error: no DCP checkpoint (.metadata) under {path}")
     step = lambda p: max((int(m.group(1)) for part in p.parts if (m := re.fullmatch(r"step_(\d+)", part))), default=-1)
     return max(candidates, key=step)
+
+
+def shared_kv_layers(*, base_model: str) -> set[int]:
+    """Layers whose values are their keys, by vLLM's rule for Gemma 4 (`_gemma4_layer_weights_mapper`):
+    full-attention layers, before any KV-shared layers, when `attention_k_eq_v` is set."""
+    from transformers import AutoConfig
+
+    try:
+        config = AutoConfig.from_pretrained(base_model, local_files_only=True)
+    except Exception as error:
+        raise SystemExit(f"Error: cannot read {base_model}'s config offline to find shared key/value layers: {error!r}")
+    text = getattr(config, "text_config", config)
+    if not getattr(text, "attention_k_eq_v", False):
+        return set()
+    first_kv_shared = text.num_hidden_layers - (getattr(text, "num_kv_shared_layers", 0) or 0)
+    return {i for i, kind in enumerate(text.layer_types[:first_kv_shared]) if kind == "full_attention"}
+
+
+def share_kv(*, adapter: dict, layers: set[int]) -> list[str]:
+    """Write each shared layer's k_proj adapter as its v_proj adapter too; the modules written."""
+    written = []
+    for key in sorted(adapter):
+        match = re.search(r"layers\.(\d+)\.self_attn\.k_proj\.(lora_[AB])\.weight$", key)
+        if not match or int(match[1]) not in layers:
+            continue
+        v_key = key.replace(".self_attn.k_proj.", ".self_attn.v_proj.")
+        if v_key in adapter:
+            raise SystemExit(f"Error: shared key/value layer {match[1]} already has a v_proj adapter ({v_key})")
+        adapter[v_key] = adapter[key].clone()
+        if match[2] == "lora_A":
+            written.append(v_key.removesuffix(".lora_A.weight"))
+    return written
 
 
 def read_adapter(*, ckpt: Path, rank: int) -> dict:
@@ -74,6 +114,7 @@ def main(ckpt, out_dir, base_model, rank, alpha, dropout):
 
     checkpoint = find_checkpoint(path=ckpt)
     adapter = read_adapter(ckpt=checkpoint, rank=rank)
+    shared = share_kv(adapter=adapter, layers=shared_kv_layers(base_model=base_model))
     out_dir.mkdir(parents=True, exist_ok=True)
     save_file(adapter, str(out_dir / "adapter_model.safetensors"))
     targets = sorted({key.split(".lora_")[0].rsplit(".", 1)[-1] for key in adapter})
@@ -83,8 +124,9 @@ def main(ckpt, out_dir, base_model, rank, alpha, dropout):
         "target_modules": targets, "modules_to_save": None,
     }
     (out_dir / "adapter_config.json").write_text(json.dumps(config, indent=2))
-    (out_dir / "source.json").write_text(json.dumps({"checkpoint": str(checkpoint)}, indent=2))
-    print(f"exported {len(adapter) // 2} adapted modules ({', '.join(targets)}) from {checkpoint} to {out_dir}")
+    (out_dir / "source.json").write_text(json.dumps({"checkpoint": str(checkpoint), "shared_kv_v_proj_copied_from_k_proj": shared}, indent=2))
+    print(f"exported {len(adapter) // 2} adapted modules ({', '.join(targets)}) from {checkpoint} to {out_dir}; "
+          f"k_proj adapter also written as v_proj for {len(shared)} shared key/value layers")
 
 
 if __name__ == "__main__":

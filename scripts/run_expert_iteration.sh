@@ -6,8 +6,9 @@
 #                into the data): scripts/expert_iteration/select_sft_data.py, aiming at --target_min..--target_max
 #   3 sft        LoRA SFT of the base model on them with prime-rl (scripts/expert_iteration/make_sft_config.py)
 #   4 export     the LoRA adapter, as a PEFT adapter vLLM can serve (scripts/expert_iteration/export_lora_adapter.py)
-#   5 evaluate   serve base + adapter on one server; greedy evaluation of both on the held-out copycat
-#                (copy_last: never trained on) and on fresh seeds of every training rule
+#   5 evaluate   serve base + adapter on one server; check that the adapter is applied (check_adapter.py); greedy
+#                evaluation of both on the held-out copycat (copy_last: never trained on) and on fresh seeds of every
+#                training rule, at --eval_rounds and again at --eval_long_rounds with fewer games
 #   6 summarize  paired base-vs-SFT comparison per rule: <experiment>/summary.md and summary.json
 #
 #   bash scripts/run_expert_iteration.sh --smoke true     # first: a tiny run through every stage (~30-60 min)
@@ -17,8 +18,11 @@
 # Run it inside the GPU allocation (tmux recommended), from the repo root, with the GPUs free: it starts and stops
 # its own vLLM servers (stop any vllm serve you started). Everything lands in $storage_dir/expert_iteration/<name>/
 # (configs, runs, data, sft, adapter, logs, stages, summary). Rerunning the same command resumes: finished stages are
-# skipped, unfinished evaluation runs resume. --redo_from <stage> reruns that stage and the ones after it. An
-# experiment refuses to continue under different settings (params.txt); pick a new --name instead.
+# skipped, unfinished evaluation runs resume, an interrupted SFT resumes from its latest checkpoint (or restarts
+# clean if it saved none). --redo_from <stage> reruns that stage and the ones after it (redoing SFT moves the old
+# training folder aside to sft.replaced-<time>, never deletes it). --stop_after <stage> stops once it is done.
+# A finished stage keeps its settings (stages/<stage>.params): changing one of them is refused unless that stage
+# is redone (--redo_from); settings of stages not yet run can change freely.
 #
 # Test hooks (CPU tests only): EI_NO_GPU=1 skips GPU checks and servers; EVAL_SCRIPT and EI_SFT_CMD replace eval.sh
 # and prime-rl's sft; EI_ROOT replaces $storage_dir/expert_iteration.
@@ -46,6 +50,12 @@ ARGS["eval_skip"]="50000"
 ARGS["eval_concurrency"]="4"
 ARGS["target_min"]="5000"
 ARGS["target_max"]="10000"
+ARGS["thresholds"]="0.8"         # selection win fractions to try, strictest first (relaxing admits luck: see select_sft_data.py)
+ARGS["max_rule_share"]="0.35"    # most any opponent may make up of the final train set
+ARGS["eval_long_rounds"]="20"    # a second, longer evaluation: discovery over time
+ARGS["eval_long_games"]="20"     # per training rule (0: no long evaluation)
+ARGS["eval_long_copycat_games"]="50"
+ARGS["ckpt_interval"]="0"        # SFT steps between checkpoints (0: a quarter of the run, at least 25)
 ARGS["lora_rank"]="16"
 ARGS["lora_alpha"]="32"
 ARGS["lr"]="1e-4"
@@ -110,7 +120,8 @@ if [[ "${ARGS["smoke"]}" == "true" ]]; then
     ARGS["name"]="${ARGS["name"]}-smoke"
     ARGS["gen_games"]="2"; ARGS["gen_rounds"]="4"; ARGS["gen_concurrency"]="2"
     ARGS["eval_games"]="2"; ARGS["eval_copycat_games"]="2"; ARGS["eval_rounds"]="4"; ARGS["eval_concurrency"]="2"
-    ARGS["target_min"]="1"; ARGS["target_max"]="300"; ARGS["batch_size"]="2"
+    ARGS["target_min"]="1"; ARGS["target_max"]="300"; ARGS["batch_size"]="2"; ARGS["max_rule_share"]="1.0"
+    ARGS["eval_long_rounds"]="6"; ARGS["eval_long_games"]="1"; ARGS["eval_long_copycat_games"]="1"
 fi
 
 name="${ARGS["name"]}"; model="${ARGS["model"]}"; gpus="${ARGS["gpus"]}"; port="${ARGS["port"]}"
@@ -125,32 +136,52 @@ STAGES=(generate select sft export evaluate summarize)
 mkdir -p "$exp_dir"/{configs,runs,logs,stages}
 source scripts/eval_runs_lib.sh || { echo "Could not source scripts/eval_runs_lib.sh"; exit 1; }
 
-# --- one experiment, one set of settings --------------------------------------------------------------
-params="$(for key in $(printf '%s\n' "${!ARGS[@]}" | sort); do
-    case "$key" in gpus|port|redo_from|stop_after) ;; *) echo "$key=${ARGS[$key]}" ;; esac
-done)"
-if [[ -f "$exp_dir/params.txt" ]]; then
-    if [[ "$(cat "$exp_dir/params.txt")" != "$params" ]]; then
-        echo "Error: $exp_dir was started with other settings; use a new --name. Differences (saved < > now):"
-        diff <(cat "$exp_dir/params.txt") <(echo "$params"); exit 1
-    fi
-else
-    echo "$params" > "$exp_dir/params.txt"
-fi
+# --- settings: a finished stage keeps its own ---------------------------------------------------------
+declare -A STAGE_KEYS=(
+    [generate]="model train_rules gen_games gen_rounds"
+    [select]="target_min target_max thresholds max_rule_share seq_len"
+    [sft]="model lora_rank lora_alpha lr epochs seq_len batch_size ckpt_interval"
+    [export]="lora_rank lora_alpha"
+    [evaluate]="eval_rules eval_games eval_copycat_games eval_rounds eval_skip eval_long_rounds eval_long_games eval_long_copycat_games"
+    [summarize]="heldout"
+)
+stage_params() { for key in ${STAGE_KEYS[$1]}; do echo "$key=${ARGS[$key]}"; done; }
 
 if [[ "${ARGS["redo_from"]}" != "none" ]]; then
     found=false
     for stage in "${STAGES[@]}"; do
         [[ "$stage" == "${ARGS["redo_from"]}" ]] && found=true
-        $found && rm -f "$exp_dir/stages/$stage.done"
+        $found && rm -f "$exp_dir/stages/$stage.done" "$exp_dir/stages/$stage.params"
     done
     $found || fail "--redo_from must be one of: ${STAGES[*]}"
+    if [[ " generate select sft " =~ " ${ARGS["redo_from"]} " && -d "$exp_dir/sft" ]]; then
+        aside="$exp_dir/sft.replaced-$(date +%Y%m%d-%H%M%S)"
+        mv "$exp_dir/sft" "$aside"
+        echo "== the previous SFT folder is kept at $aside (delete it to free its checkpoint's space)"
+    fi
 fi
 if [[ "${ARGS["stop_after"]}" != "none" && ! " ${STAGES[*]} " =~ " ${ARGS["stop_after"]} " ]]; then
     fail "--stop_after must be one of: ${STAGES[*]}"
 fi
+mismatches=()
+for stage in "${STAGES[@]}"; do
+    [[ -f "$exp_dir/stages/$stage.done" ]] || continue
+    saved="$exp_dir/stages/$stage.params"
+    [[ -f "$saved" ]] || saved="$exp_dir/params.txt"   # stages finished before per-stage settings were kept
+    [[ -f "$saved" ]] || continue
+    for key in ${STAGE_KEYS[$stage]}; do
+        line="$(grep -m 1 "^$key=" "$saved")"
+        [[ -n "$line" && "$line" != "$key=${ARGS[$key]}" ]] && mismatches+=("$stage: ${line} (now ${ARGS[$key]})")
+    done
+done
+if [[ ${#mismatches[@]} -gt 0 ]]; then
+    echo "Error: finished stages were run with other settings; redo them (--redo_from <stage>) or use a new --name:"
+    printf '  %s\n' "${mismatches[@]}"
+    exit 1
+fi
+
 stage_done() { [[ -f "$exp_dir/stages/$1.done" ]]; }
-mark_done() { date > "$exp_dir/stages/$1.done"; echo "== stage $1 done"; }
+mark_done() { stage_params "$1" > "$exp_dir/stages/$1.params"; date > "$exp_dir/stages/$1.done"; echo "== stage $1 done"; }
 stop_if_requested() {
     if [[ "${ARGS["stop_after"]}" == "$1" ]]; then
         echo "== stopping after stage $1 (--stop_after); rerun without it (same settings) to continue"
@@ -196,17 +227,17 @@ stop_server() {
 }
 trap stop_server EXIT
 
-run_all() {  # run_all <list file> <run name prefix>: every "<rule> <config>" line as a run, all at once
-    local list="$1" prefix="$2" pids=() rules=() failed=()
+run_all() {  # run_all <list file> <run name prefix> [suffix]: every "<rule> <config>" line as run <prefix>-<rule><suffix>
+    local list="$1" prefix="$2" suffix="${3:-}" pids=() rules=() failed=()
     while read -r rule config; do
-        ( run_condition "$config" "$prefix-$rule" ) > "$exp_dir/logs/$prefix-$rule.log" 2>&1 &
+        ( run_condition "$config" "$prefix-$rule$suffix" ) > "$exp_dir/logs/$prefix-$rule$suffix.log" 2>&1 &
         pids+=($!); rules+=("$rule")
     done < "$list"
     for i in "${!pids[@]}"; do
         wait "${pids[$i]}" || failed+=("${rules[$i]}")
     done
-    [[ ${#failed[@]} -eq 0 ]] || fail "runs failed for: ${failed[*]} (logs: $exp_dir/logs/$prefix-<rule>.log); rerun to resume"
-    echo "== all $prefix runs complete"
+    [[ ${#failed[@]} -eq 0 ]] || fail "runs failed for: ${failed[*]} (logs: $exp_dir/logs/$prefix-<rule>$suffix.log); rerun to resume"
+    echo "== all $prefix$suffix runs complete"
 }
 
 # --- 1 generate ------------------------------------------------------------------------------------------
@@ -223,9 +254,10 @@ stop_if_requested generate
 
 # --- 2 select --------------------------------------------------------------------------------------------
 if ! stage_done select; then
-    select_args=()
-    # smoke: any won round counts and nothing is held out for validation (a handful of examples must all train)
-    $smoke && select_args=(--thresholds 0.8,0.6,0.0 --min_window 1 --hard_min 1 --val_fraction 0)
+    select_args=(--thresholds "${ARGS["thresholds"]}" --max_rule_share "${ARGS["max_rule_share"]}")
+    # smoke: any won round counts and nothing is held out for validation (a handful of examples must all train);
+    # later flags win, so these override the defaults above
+    $smoke && select_args+=(--thresholds 0.8,0.6,0.0 --min_window 1 --hard_min 1 --val_fraction 0)
     python scripts/expert_iteration/select_sft_data.py $(for rule in "${train_rules[@]}"; do echo --runs "$runs_dir/$name-gen-$rule"; done) \
         --out_dir "$exp_dir/data" --model "$model" --target_min "${ARGS["target_min"]}" --target_max "${ARGS["target_max"]}" \
         --max_tokens_per_example $(( ${ARGS["seq_len"]} - 256 )) "${select_args[@]}" | tee "$exp_dir/logs/select.log"
@@ -241,10 +273,23 @@ if ! stage_done sft; then
     python scripts/expert_iteration/make_sft_config.py --data_dir "$exp_dir/data" --out "$exp_dir/sft/sft.toml" \
         --output_dir "$exp_dir/sft/outputs" --run_name "$name-sft" --model "$model" --num_gpus "$num_gpus" \
         --rank "${ARGS["lora_rank"]}" --alpha "${ARGS["lora_alpha"]}" --lr "${ARGS["lr"]}" --seq_len "${ARGS["seq_len"]}" \
-        --batch_size "${ARGS["batch_size"]}" --epochs "${ARGS["epochs"]}" "${sft_args[@]}" || fail "make_sft_config"
+        --batch_size "${ARGS["batch_size"]}" --epochs "${ARGS["epochs"]}" --ckpt_interval "${ARGS["ckpt_interval"]}" \
+        "${sft_args[@]}" || fail "make_sft_config"
     gpus_free
+    # an earlier attempt of this stage: resume its latest checkpoint, or restart clean if it saved none
+    # (prime-rl refuses a run folder with a previous run's artifacts unless told which)
+    sft_run_dir="$exp_dir/sft/outputs/$name-sft"
+    latest_ckpt="$(ls -d "$sft_run_dir"/checkpoints/step_*/trainer/.metadata 2> /dev/null | sort -V | tail -n 1)"
+    sft_mode=()
+    if [[ -n "$latest_ckpt" ]]; then
+        sft_mode=(--resume)
+        echo "== SFT: resuming from $(dirname "$(dirname "$latest_ckpt")")"
+    elif python -c "import sys; from pathlib import Path; from prime_rl.utils.pathing import has_run_artifacts; sys.exit(0 if has_run_artifacts(Path(sys.argv[1])) else 1)" "$sft_run_dir"; then
+        sft_mode=(--clean)
+        echo "== SFT: an earlier attempt saved no checkpoint; restarting it clean"
+    fi
     echo "== SFT (log: $exp_dir/logs/sft.log)"
-    ( cd prime-rl && CUDA_VISIBLE_DEVICES="$gpus" ${EI_SFT_CMD:-sft} @ "$exp_dir/sft/sft.toml" ) 2>&1 | tee "$exp_dir/logs/sft.log"
+    ( cd prime-rl && CUDA_VISIBLE_DEVICES="$gpus" ${EI_SFT_CMD:-sft} @ "$exp_dir/sft/sft.toml" "${sft_mode[@]}" ) 2>&1 | tee -a "$exp_dir/logs/sft.log"
     [[ ${PIPESTATUS[0]} -eq 0 ]] || fail "SFT failed (log: $exp_dir/logs/sft.log)"
     mark_done sft
 fi
@@ -263,6 +308,7 @@ stop_if_requested export
 adapter_hash="$(sha256sum "$exp_dir/adapter/adapter_model.safetensors" 2> /dev/null | cut -c1-10)"
 adapter_name="$name-sft-$adapter_hash"
 sft_arm="sft-$adapter_hash"
+long_suffix="r${ARGS["eval_long_rounds"]}"
 
 # --- 5 evaluate ------------------------------------------------------------------------------------------
 if ! stage_done evaluate; then
@@ -273,10 +319,27 @@ if ! stage_done evaluate; then
             --rules "${ARGS["eval_rules"]}" --games "${ARGS["eval_games"]}" --copycat_games "${ARGS["eval_copycat_games"]}" \
             --rounds "${ARGS["eval_rounds"]}" --skip "${ARGS["eval_skip"]}" --temperature 0 \
             --max_concurrent "${ARGS["eval_concurrency"]}" --tag "$arm" > "$exp_dir/configs/eval-$arm.list" || fail "make_configs (eval $arm)"
+        if [[ "${ARGS["eval_long_games"]}" -gt 0 ]]; then
+            python scripts/expert_iteration/make_configs.py --out_dir "$exp_dir/configs" --kind eval --model "$arm_model" \
+                --rules "${ARGS["eval_rules"]}" --games "${ARGS["eval_long_games"]}" --copycat_games "${ARGS["eval_long_copycat_games"]}" \
+                --rounds "${ARGS["eval_long_rounds"]}" --skip "${ARGS["eval_skip"]}" --temperature 0 \
+                --max_concurrent "${ARGS["eval_concurrency"]}" --tag "$arm-$long_suffix" > "$exp_dir/configs/eval-$arm-$long_suffix.list" \
+                || fail "make_configs (eval $arm, long)"
+        fi
     done
     start_server eval --enable-lora --max-lora-rank "${ARGS["lora_rank"]}" --max-loras 1 --lora-modules "$adapter_name=$exp_dir/adapter"
+    if [[ -z "${EI_NO_GPU:-}" ]]; then
+        check_args=()
+        $smoke || check_args=(--require_improvement)
+        python scripts/expert_iteration/check_adapter.py --base_url "$base_url" --base_model "$model" --adapter_name "$adapter_name" \
+            --data_dir "$exp_dir/data" --out "$exp_dir/adapter_check.json" "${check_args[@]}" || fail "adapter check (see $exp_dir/adapter_check.json)"
+    fi
     run_all "$exp_dir/configs/eval-base.list" "$name-eval-base"
     run_all "$exp_dir/configs/eval-$sft_arm.list" "$name-eval-$sft_arm"
+    if [[ "${ARGS["eval_long_games"]}" -gt 0 ]]; then
+        run_all "$exp_dir/configs/eval-base-$long_suffix.list" "$name-eval-base" "-$long_suffix"
+        run_all "$exp_dir/configs/eval-$sft_arm-$long_suffix.list" "$name-eval-$sft_arm" "-$long_suffix"
+    fi
     stop_server
     mark_done evaluate
 fi
@@ -284,8 +347,11 @@ stop_if_requested evaluate
 
 # --- 6 summarize -----------------------------------------------------------------------------------------
 if ! stage_done summarize; then
+    long_args=()
+    [[ "${ARGS["eval_long_games"]}" -gt 0 ]] && long_args=(--long_suffix "-$long_suffix" --long_label "${ARGS["eval_long_rounds"]} rounds")
     python scripts/expert_iteration/summarize.py --runs_dir "$runs_dir" --name "$name" --sft_arm "$sft_arm" --rules "${ARGS["eval_rules"]}" \
-        --heldout "${ARGS["heldout"]}" --out_json "$exp_dir/summary.json" --out_md "$exp_dir/summary.md" || fail "summary (see above)"
+        --heldout "${ARGS["heldout"]}" --main_label "${ARGS["eval_rounds"]} rounds" "${long_args[@]}" \
+        --out_json "$exp_dir/summary.json" --out_md "$exp_dir/summary.md" || fail "summary (see above)"
     mark_done summarize
 fi
 echo "== done: $exp_dir/summary.md (data: $exp_dir/data/stats.json)"

@@ -10,7 +10,9 @@ Each step packs batch_size rows of seq_len tokens; only completion tokens are tr
 Gemma 4 needs: renderer "gemma4" (prime-rl's typed renderer; SFT refuses the default one), and
 the fused LM head off (the model softcaps its final logits). The frozen base and the LoRA
 weights are held in bfloat16 (as prime-rl's LoRA SFT example does), halving memory against the
-float32 default; the checkpoint at the end holds the whole model, so only the last is kept.
+float32 default. Checkpoints hold the whole model (about 62 GB in bfloat16), so only the latest
+is kept; one is written every --ckpt_interval steps (default: a quarter of the run, at least 25
+steps) so an interrupted run resumes from it, and one at the end.
 """
 
 import json
@@ -65,7 +67,7 @@ max_norm = 1.0
 
 [ckpt]
 keep_last = 1
-{val}"""
+{ckpt_interval}{val}"""
 
 
 @click.command()
@@ -85,8 +87,9 @@ keep_last = 1
 @click.option("--packing_efficiency", default=0.9)
 @click.option("--max_steps", "max_steps_override", default=None, type=int, help="Overrides the computed step count.")
 @click.option("--val_interval", default=50)
+@click.option("--ckpt_interval", default=0, help="Steps between checkpoints; 0: a quarter of the run, at least 25.")
 def main(data_dir, out, output_dir, run_name, model, renderer, num_gpus, rank, alpha, lr, seq_len, batch_size, epochs,
-         packing_efficiency, max_steps_override, val_interval):
+         packing_efficiency, max_steps_override, val_interval, ckpt_interval):
     if batch_size % num_gpus:
         raise click.BadParameter(f"batch_size {batch_size} must be divisible by num_gpus {num_gpus}")
     stats = json.loads((data_dir / "stats.json").read_text())
@@ -95,6 +98,8 @@ def main(data_dir, out, output_dir, run_name, model, renderer, num_gpus, rank, a
     computed = max(1, math.ceil(epochs * stats["train_tokens"] / (batch_size * seq_len * packing_efficiency)))
     max_steps = max_steps_override or computed
     warmup = min(10, max_steps // 10)
+    interval = ckpt_interval or max(25, math.ceil(max_steps / 4))
+    ckpt_line = f"interval = {interval}\n" if interval < max_steps else ""
     scheduler = (f'type = "cosine"\nwarmup_steps = {warmup}\nmin_lr = {lr / 10}' if max_steps >= 20 else 'type = "constant"')
     renderer_block = 'name = "gemma4"\nenable_thinking = false' if renderer == "gemma4" else f'name = "{renderer}"'
     val = ""
@@ -105,7 +110,7 @@ def main(data_dir, out, output_dir, run_name, model, renderer, num_gpus, rank, a
     out.write_text(TEMPLATE.format(
         max_steps=max_steps, output_dir=output_dir, run_name=run_name, num_gpus=num_gpus, model=model, rank=rank,
         alpha=alpha, renderer=renderer_block, data_dir=data_dir / "dataset", seq_len=seq_len, batch_size=batch_size, lr=lr,
-        scheduler=scheduler, val=val,
+        scheduler=scheduler, val=val, ckpt_interval=ckpt_line,
     ))
     print(json.dumps({"config": str(out), "max_steps": max_steps, "computed_max_steps": computed,
                       "train_tokens": stats["train_tokens"], "tokens_per_step": batch_size * seq_len}))
