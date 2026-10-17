@@ -24,14 +24,24 @@ derived from the seed (see `rng`), never kept as a live generator in the state.
 Rewards come at two grains, both decided once the game is over: `get_outcome` gives each
 player one reward for the game, and `get_step_rewards` gives each accepted step its own,
 so a step can be credited by what it led to later.
+
+Predictions are optional (see `self_play.prediction`): a game lists the targets it supports
+in `prediction_targets`, describes each decision's target with `get_prediction_spec` (from
+the observation only, never from hidden state), and names the observed outcome once a step
+has revealed it with `resolve_prediction_target`. Games without them refuse prediction modes.
 """
 
+import inspect
 import json
 import random
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, ClassVar
+
+from self_play.prediction import PredictionSpec
+from self_play.prompting import prediction_format
 
 THINK = "THINK"
 """The action of a thinking turn, the same in every game. Games never use it themselves."""
@@ -191,6 +201,35 @@ class Game(ABC):
         if not outcome["done"]:
             raise RuntimeError("step rewards are decided only once the game is over")
         return [outcome["rewards"][step["player_id"]] for step in self.steps]
+
+    # --- predictions (optional) ------------------------------------------------------
+
+    prediction_targets: ClassVar[tuple[str, ...]] = ()
+    """The prediction targets this game supports, e.g. ("opponent_action",). Empty: none."""
+
+    def get_prediction_spec(self, *, player_id: str, observation: dict[str, Any], target_id: str) -> PredictionSpec | None:
+        """What `player_id` is asked to forecast at its current decision, built only from its
+        observation. None when the game has no such target now."""
+        return None
+
+    def resolve_prediction_target(self, *, player_id: str, step_id: int, target_id: str) -> str | None:
+        """The observed label of the target for the decision that became step `step_id`,
+        using only what that step made public. None when it is not publicly resolved."""
+        return None
+
+    def render_prediction_request(self, *, spec: PredictionSpec) -> str:
+        """The forecast instruction added to a move call. Never describes how others behave."""
+        return (
+            f"Before choosing your action, predict {spec.description} using only the information currently "
+            "available to you. Express your uncertainty as probabilities over its possible values. Put the "
+            "probabilities in the prediction field, then choose your action according to the game's stated objective.\n"
+            + prediction_format(labels=spec.labels)
+        )
+
+    def prompt_templates(self) -> list[str]:
+        """Texts that define this game's prompts, for the checkpoint fingerprint. The default is
+        the source of the game's module, so any change to it counts as a different condition."""
+        return [inspect.getsource(sys.modules[type(self).__module__])]
 
     # --- text for players --------------------------------------------------------
 

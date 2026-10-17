@@ -1,0 +1,31 @@
+# Prediction protocol v1 (reports/strategic_reasoning_training_plan.md), condition B1: prediction_mode = "opponent_action_v1".
+# Long-game follow-up: 20 games x 100 rounds, temperature 0. Paired with its B0 counterpart: same model, seeds (0..19), rounds, sampling and token budget.
+# Run through scripts/run_prediction_baseline.sh, or directly:
+#   bash scripts/eval.sh --config eval_configs/prediction_b1_t0_r100.toml --name <run name> --base_url http://<node>:8000/v1
+model = "google/gemma-4-31b-it"
+push = false              # the default uploads the run to the Prime Intellect platform
+max_concurrent = 10
+
+[select]
+limit = 20                # games, seeds 0..19
+
+[client]                  # fallback endpoint for any seat that does not pin one
+type = "eval"
+base_url = "http://localhost:8000/v1"
+api_key_var = "VLLM_API_KEY"   # unset means "EMPTY", which a server without --api-key accepts
+
+[sampling]                # pinned explicitly, never left to server defaults
+temperature = 0
+top_p = 0.95
+top_k = 64
+max_tokens = 4096
+
+[env]
+game = "copycat_rps"
+prediction_mode = "opponent_action_v1"
+
+[env.game_config]         # every setting but the seed, which each task supplies
+rounds = 100
+
+[env.taskset]
+id = "self-play-verifiers"

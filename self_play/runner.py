@@ -25,6 +25,20 @@ after every call, so a crash loses at most the call in flight. A new Runner on t
 path resumes: it restores the phase start and replays the phase with the journal's replies
 instead of calling the model (each replayed prompt must match the saved one exactly), then
 continues live. A finished game's snapshot holds its result, so it is never played again.
+
+A snapshot also stores the run's `fingerprint` (prompt templates, model, sampling, runner
+settings; built by the caller). A snapshot is reused only under an identical fingerprint, so
+a finished game from another condition is never returned as this one's result. Snapshots
+written before fingerprints existed are refused unless `allow_legacy_checkpoint` is set.
+
+Every call gets a `call_id` ("call-<n>", n counting the game's calls from 0), the same when
+the call is replayed from a checkpoint.
+
+Predictions (`prediction_mode`, see `self_play.prediction`): move calls also ask for a
+forecast of the game's target. The forecast is parsed into the call's record entry and
+never affects the move, retries or fallbacks, nor any later prompt.
+`prediction_decisions()` pairs each executed decision with the forecast of its final move
+attempt and the outcome the game later revealed.
 """
 
 import asyncio
@@ -35,9 +49,12 @@ from typing import Any
 from self_play.chat_model import ChatModel
 from self_play.checkpoint import load_snapshot, save_snapshot
 from self_play.game import THINK, DialogueMode, DialoguePhase, Game, StepResult
+from self_play.prediction import PREDICTION_MODES, SCHEMA_VERSION, TARGET_FOR_MODE, PredictionSpec, parse_prediction
 from self_play.prompting import (
     NO_CHANGE,
+    PREDICTION_SYSTEM_PROMPT,
     SILENCE,
+    SYSTEM_PROMPT,
     TALK_INSTRUCTION,
     THINK_INSTRUCTION,
     build_messages,
@@ -58,10 +75,26 @@ class Runner:
         max_retries: int = 0,
         talk_window: int = TALK_WINDOW,
         checkpoint_path: str | Path | None = None,
+        prediction_mode: str = "off",
+        fingerprint: dict[str, Any] | None = None,
+        allow_legacy_checkpoint: bool = False,
     ):
         missing, unknown = set(game.player_ids) - set(models), set(models) - set(game.player_ids)
         if missing or unknown:
             raise ValueError(f"models must match the game's players: missing {sorted(missing)}, unknown {sorted(unknown)}")
+        if prediction_mode not in PREDICTION_MODES:
+            raise ValueError(f"unknown prediction_mode {prediction_mode!r}; known: {list(PREDICTION_MODES)}")
+        self.prediction_mode = prediction_mode
+        self.prediction_target = TARGET_FOR_MODE.get(prediction_mode)
+        """The target forecast on move calls, or None when predictions are off."""
+        if self.prediction_target is not None and self.prediction_target not in game.prediction_targets:
+            raise ValueError(
+                f"prediction_mode {prediction_mode!r} needs a {self.prediction_target!r} prediction target, which "
+                f"{game.name} does not provide (it supports {list(game.prediction_targets) or 'none'})"
+            )
+        self.fingerprint = json.loads(json.dumps(fingerprint)) if fingerprint is not None else None
+        self.allow_legacy_checkpoint = allow_legacy_checkpoint
+        self._calls_made = 0
         self.game = game
         self.models = dict(models)
         self.max_retries = max_retries
@@ -140,6 +173,48 @@ class Runner:
                 return entry["notes"]
         return ""
 
+    def prediction_decisions(self) -> list[dict[str, Any]]:
+        """One record per executed game decision (accepted non-thinking step), in order, when
+        a prediction mode is on; [] otherwise. The forecast is that of the decision's final
+        move attempt (a retry replaces the attempt before it; a fallback keeps the last one);
+        forced actions had no call and carry no forecast. `observed_target` comes from the
+        game once the step made it public; `round_reward` once the game is over."""
+        if self.prediction_target is None:
+            return []
+        step_rewards = self.game.get_step_rewards() if self.game.get_outcome()["done"] else None
+        attempts: dict[str, list[dict[str, Any]]] = {}
+        decisions = []
+        for entry in self.record:
+            if entry["kind"] == "call" and entry["call"] == "answer":
+                attempts.setdefault(entry["player_id"], []).append(entry)
+            elif entry["kind"] == "action" and entry["accepted"] and entry["action"] != THINK:
+                player_id, step_id = entry["player_id"], entry["step_id"]
+                tried = attempts.pop(player_id, [])
+                prediction = tried[-1].get("prediction") if tried else None
+                decisions.append({
+                    "schema_version": SCHEMA_VERSION,
+                    "protocol": self.prediction_mode,
+                    "call_id": tried[-1]["call_id"] if tried else None,
+                    "attempt_call_ids": [call["call_id"] for call in tried],
+                    "player_id": player_id,
+                    "decision_id": prediction["decision_id"] if prediction else None,
+                    "step_id": step_id,
+                    "prediction_target_id": self.prediction_target,
+                    "prediction_labels": prediction["labels"] if prediction else None,
+                    "prediction_raw": prediction["raw"] if prediction else None,
+                    "prediction_raw_probs": prediction["raw_probs"] if prediction else None,
+                    "prediction_probs": prediction["probs"] if prediction else None,
+                    "prediction_status": prediction["status"] if prediction else None,
+                    "prediction_normalized": prediction["normalized"] if prediction else False,
+                    "observed_target": self.game.resolve_prediction_target(
+                        player_id=player_id, step_id=step_id, target_id=self.prediction_target
+                    ),
+                    "executed_action": entry["action"],
+                    "action_source": entry["source"],
+                    "round_reward": step_rewards[step_id] if step_rewards is not None else None,
+                })
+        return decisions
+
     def call_step_ids(self) -> list[int | None]:
         """For each call entry, in record order: the id of the step it led to, i.e. the
         caller's next accepted action. None if the caller never acted again."""
@@ -168,7 +243,9 @@ class Runner:
     def _save(self) -> None:
         if self.checkpoint_path is None:
             return
-        snapshot: dict[str, Any] = {"game": self.game.name, "game_config": self.game.game_config, "record": self.record}
+        snapshot: dict[str, Any] = {
+            "game": self.game.name, "game_config": self.game.game_config, "fingerprint": self.fingerprint, "record": self.record,
+        }
         if self.finished_result is not None:
             snapshot |= {"finished": True, "result": self.finished_result, "final_game": self.game.to_dict(),
                          "invalid": self.invalid}
@@ -180,6 +257,7 @@ class Runner:
         same_config = json.dumps(snapshot["game_config"], sort_keys=True) == json.dumps(self.game.game_config, sort_keys=True)
         if snapshot["game"] != self.game.name or not same_config:
             raise ValueError(f"{self.checkpoint_path} holds a different game: {snapshot['game']} {snapshot['game_config']}")
+        self._check_fingerprint(snapshot=snapshot)
         game_class = type(self.game)
         self.resumed = True
         if snapshot["finished"]:
@@ -194,6 +272,24 @@ class Runner:
         self.invalid = dict(start["invalid"])
         self._last_phase_id = start["last_phase_id"]
         self._replay = list(snapshot["journal"])
+        self._calls_made = sum(1 for entry in self.record if entry["kind"] == "call")
+
+    def _check_fingerprint(self, *, snapshot: dict[str, Any]) -> None:
+        """Reuse a snapshot only under the same run fingerprint (see the module docstring)."""
+        if "fingerprint" not in snapshot:
+            if self.fingerprint is not None and not self.allow_legacy_checkpoint:
+                raise ValueError(
+                    f"{self.checkpoint_path} was written without a run fingerprint (an older checkpoint), so its "
+                    "condition cannot be checked; use a fresh checkpoint directory, or allow_legacy_checkpoint to reuse it"
+                )
+            return
+        saved = snapshot["fingerprint"]
+        if json.dumps(saved, sort_keys=True) != json.dumps(self.fingerprint, sort_keys=True):
+            differing = sorted(
+                key for key in set(saved or {}) | set(self.fingerprint or {})
+                if (saved or {}).get(key) != (self.fingerprint or {}).get(key)
+            )
+            raise ValueError(f"{self.checkpoint_path} was written under a different run condition (differs in {differing})")
 
     def _take_replay(self, *, player_id: str, kind: str, messages: list[dict]) -> dict[str, Any] | None:
         """The saved reply for this call when resuming, else None (call the model)."""
@@ -260,11 +356,21 @@ class Runner:
         return [e for e in self.record if e["kind"] == "message"][-self.talk_window:]
 
     async def _call(
-        self, *, phase: DialoguePhase, player_id: str, kind: str, instruction: str, feedback: str | None = None
+        self,
+        *,
+        phase: DialoguePhase,
+        player_id: str,
+        kind: str,
+        instruction: str,
+        feedback: str | None = None,
+        spec: PredictionSpec | None = None,
     ) -> dict[str, Any]:
         """One model call (or its saved reply when resuming). Returns its record entry; the
         caller appends it, so calls made at once land in the record in a fixed order. Every
-        completed call is journaled and checkpointed at once."""
+        completed call is journaled and checkpointed at once. With a prediction `spec` the
+        call uses the prediction system prompt and its forecast is parsed into the entry."""
+        call_id = f"call-{self._calls_made}"  # taken before any await, so concurrent calls number in a fixed order
+        self._calls_made += 1
         observation = self.game.get_observation(player_id=player_id)
         messages = build_messages(
             game_text=self.game.render_observation(observation=observation),
@@ -272,6 +378,7 @@ class Runner:
             talk=self._talk_seen(player_id=player_id, kind=kind),
             instruction=instruction,
             feedback=feedback,
+            system_prompt=SYSTEM_PROMPT if spec is None else PREDICTION_SYSTEM_PROMPT,
         )
         entry = self._take_replay(player_id=player_id, kind=kind, messages=messages)
         if entry is None:
@@ -280,6 +387,7 @@ class Runner:
             entry = {
                 "kind": "call",
                 "call": kind,
+                "call_id": call_id,
                 "player_id": player_id,
                 "phase_id": phase.phase_id,
                 "n_steps": self.game.n_steps,
@@ -288,6 +396,11 @@ class Runner:
                 "thinking": thinking,
                 "answer": answer,
             }
+            if spec is not None:
+                parsed = parse_prediction(reply=reply, labels=spec.labels)
+                entry["prediction"] = {"protocol": self.prediction_mode, **spec.to_dict(), **parsed.to_dict()}
+        elif entry.setdefault("call_id", call_id) != call_id:
+            raise RuntimeError(f"resuming {self.checkpoint_path}: replayed call {entry['call_id']} arrived as {call_id}")
         self._journal.append(dict(entry))
         self._save()
         return entry
@@ -302,7 +415,17 @@ class Runner:
     async def _ask(self, *, phase: DialoguePhase, player_id: str, feedback: str | None = None) -> dict[str, Any]:
         legal = self.game.get_legal_actions(player_id=player_id)
         instruction = self.game.render_answer_request(legal_actions=legal)
-        return await self._call(phase=phase, player_id=player_id, kind="answer", instruction=instruction, feedback=feedback)
+        spec = None
+        if self.prediction_target is not None:
+            spec = self.game.get_prediction_spec(
+                player_id=player_id, observation=self.game.get_observation(player_id=player_id), target_id=self.prediction_target
+            )
+            if spec is None:
+                raise RuntimeError(f"{self.game.name} gave no {self.prediction_target!r} prediction for {player_id}'s move")
+            instruction = f"{instruction}\n\n{self.game.render_prediction_request(spec=spec)}"
+        return await self._call(
+            phase=phase, player_id=player_id, kind="answer", instruction=instruction, feedback=feedback, spec=spec
+        )
 
     async def _act(self, *, phase: DialoguePhase, player_id: str, first_call: dict[str, Any] | None = None) -> None:
         """Ask (unless already asked), try the answer, retry with the reason, then fall back

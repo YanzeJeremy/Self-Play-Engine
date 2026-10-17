@@ -1,0 +1,249 @@
+{
+ "generated_at_commit": "54cf5ed",
+ "calls": [
+  "think",
+  "talk",
+  "answer",
+  "think",
+  "answer",
+  "answer",
+  "think",
+  "talk",
+  "answer",
+  "think",
+  "answer",
+  "think",
+  "talk",
+  "answer",
+  "answer",
+  "think",
+  "answer",
+  "think",
+  "talk",
+  "answer",
+  "think",
+  "answer"
+ ],
+ "messages": [
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nNo rounds have been played yet.\n\nScore: 0 won, 0 lost, 0 drawn.\n\nNext is round 1 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes: (none yet)\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nNo rounds have been played yet.\n\nScore: 0 won, 0 lost, 0 drawn.\n\nNext is round 1 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes:\nfirst notes\n\nBefore you decide, you may say something to the table. Put what you say inside <answer>; everyone hears it, and it is not binding.\nTo say nothing, answer SILENCE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nNo rounds have been played yet.\n\nScore: 0 won, 0 lost, 0 drawn.\n\nNext is round 1 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes:\nfirst notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\n\nScore: 0 won, 0 lost, 1 drawn.\n\nNext is round 2 of 8. The opponent says: \"The player is doing whatever they want\"\n\nYour notes:\nfirst notes\n\nTable talk:\n- player said: I always win.\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\n\nScore: 0 won, 0 lost, 1 drawn.\n\nNext is round 2 of 8. The opponent says: \"The player is doing whatever they want\"\n\nYour notes:\nfirst notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\n\nScore: 0 won, 0 lost, 1 drawn.\n\nNext is round 2 of 8. The opponent says: \"The player is doing whatever they want\"\n\nYour notes:\nfirst notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors.\n\nYour previous answer was rejected: \"lizard\" is not legal now; legal actions: \"rock\", \"paper\", \"scissors\". Answer again."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\n\nScore: 1 won, 0 lost, 1 drawn.\n\nNext is round 3 of 8. The opponent says: \"I think I'm good at this\"\n\nYour notes:\nfirst notes\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\n\nScore: 1 won, 0 lost, 1 drawn.\n\nNext is round 3 of 8. The opponent says: \"I think I'm good at this\"\n\nYour notes:\nfirst notes\n\nTable talk:\n- player said: I always win.\n\nBefore you decide, you may say something to the table. Put what you say inside <answer>; everyone hears it, and it is not binding.\nTo say nothing, answer SILENCE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\n\nScore: 1 won, 0 lost, 1 drawn.\n\nNext is round 3 of 8. The opponent says: \"I think I'm good at this\"\n\nYour notes:\nfirst notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\n\nScore: 2 won, 0 lost, 1 drawn.\n\nNext is round 4 of 8. The opponent says: \"I will play paper.\"\n\nYour notes:\nfirst notes\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\n\nScore: 2 won, 0 lost, 1 drawn.\n\nNext is round 4 of 8. The opponent says: \"I will play paper.\"\n\nYour notes:\nsecond notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\n\nScore: 3 won, 0 lost, 1 drawn.\n\nNext is round 5 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes:\nsecond notes\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\n\nScore: 3 won, 0 lost, 1 drawn.\n\nNext is round 5 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes:\nsecond notes\n\nTable talk:\n- player said: I always win.\n\nBefore you decide, you may say something to the table. Put what you say inside <answer>; everyone hears it, and it is not binding.\nTo say nothing, answer SILENCE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\n\nScore: 3 won, 0 lost, 1 drawn.\n\nNext is round 5 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes:\nsecond notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\n\nScore: 3 won, 0 lost, 1 drawn.\n\nNext is round 5 of 8. The opponent says: \"I'm sure I'll beat you with this\"\n\nYour notes:\nsecond notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors.\n\nYour previous answer was rejected: \"spock\" is not legal now; legal actions: \"rock\", \"paper\", \"scissors\". Answer again."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\n\nScore: 3 won, 0 lost, 2 drawn.\n\nNext is round 6 of 8. The opponent says: \"The player is doing whatever they want\"\n\nYour notes:\nsecond notes\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\n\nScore: 3 won, 0 lost, 2 drawn.\n\nNext is round 6 of 8. The opponent says: \"The player is doing whatever they want\"\n\nYour notes:\nsecond notes\n\nTable talk:\n- player said: I always win.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 6: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\n\nScore: 4 won, 0 lost, 2 drawn.\n\nNext is round 7 of 8. The opponent says: \"I think I'm good at this\"\n\nYour notes:\nsecond notes\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 6: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\n\nScore: 4 won, 0 lost, 2 drawn.\n\nNext is round 7 of 8. The opponent says: \"I think I'm good at this\"\n\nYour notes:\nthird notes\n\nTable talk:\n- player said: I always win.\n\nBefore you decide, you may say something to the table. Put what you say inside <answer>; everyone hears it, and it is not binding.\nTo say nothing, answer SILENCE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 6: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\n\nScore: 4 won, 0 lost, 2 drawn.\n\nNext is round 7 of 8. The opponent says: \"I think I'm good at this\"\n\nYour notes:\nthird notes\n\nTable talk:\n- player said: I always win.\n- player said: We'll see.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 6: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 7: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\n\nScore: 5 won, 0 lost, 2 drawn.\n\nNext is round 8 of 8. The opponent says: \"I will play scissors.\"\n\nYour notes:\nthird notes\n\nTable talk:\n- player said: We'll see.\n\nThis is a thinking turn. Write your complete new notes inside <answer>: what you believe, your plan, and anything you would otherwise forget. They replace your current notes entirely and are shown to you at every turn until your next thinking turn.\nTo keep your current notes exactly as they are, answer NO CHANGE."
+   }
+  ],
+  [
+   {
+    "role": "system",
+    "content": "You are a player in a game. Every time you are asked something, reply in exactly this format:\n<thinking>your private reasoning</thinking>\n<answer>your answer</answer>\n[STOP]\n\nYour thinking is scratch work: nobody else sees it, and you will not see it again.\nYour notes are your only memory between turns. You rewrite them only in thinking turns, and they are shown to you every time you are asked something."
+   },
+   {
+    "role": "user",
+    "content": "You are playing rock paper scissors against a computer opponent over 8 rounds.\nEach round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,\npaper beats rock, and equal choices draw. Whoever wins more rounds wins the game.\nThe opponent may talk before you choose. What it says is not binding and may be untrue.\n\nRound 1: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 2: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 3: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\nRound 4: the opponent said \"I will play paper.\"; you played rock, the opponent played scissors; you won.\nRound 5: the opponent said \"I'm sure I'll beat you with this\"; you played rock, the opponent played rock; a draw.\nRound 6: the opponent said \"The player is doing whatever they want\"; you played paper, the opponent played rock; you won.\nRound 7: the opponent said \"I think I'm good at this\"; you played scissors, the opponent played paper; you won.\n\nScore: 5 won, 0 lost, 2 drawn.\n\nNext is round 8 of 8. The opponent says: \"I will play scissors.\"\n\nYour notes:\nthird notes\n\nTable talk:\n- player said: I always win.\n- player said: We'll see.\n\nYour answer is your move for this round: one of rock, paper, scissors."
+   }
+  ]
+ ]
+}

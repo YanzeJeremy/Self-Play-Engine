@@ -5,7 +5,8 @@
 #   bash scripts/eval.sh --config eval_configs/smoke.toml --name smoke-001 --base_url http://<node>:8000/v1
 #   bash scripts/eval.sh --name smoke-001 --resume true      # continue an interrupted run
 #
-# The run lands in $storage_dir/eval_runs/<name>/ (vf-eval's traces.jsonl, configs/, logs/)
+# The run lands in $storage_dir/eval_runs/<name>/ (vf-eval's traces.jsonl, configs/, logs/, and
+# manifests/<time>.json from scripts/write_run_manifest.py, one per invocation)
 # with mid-game checkpoints in its checkpoints/ folder. Checkpointing needs one rollout per
 # task, so -r 1 is always passed. A resume reuses the run's saved config, checkpoint folder
 # included; vf-eval reruns only unfinished games, and each continues from its checkpoint.
@@ -73,10 +74,12 @@ run_dir="$runs_dir/$name"
 if [[ "${ARGS["resume"]}" == "true" || "${ARGS["resume"]}" == "yes" || "${ARGS["resume"]}" == "y" ]]; then
     saved_config="$run_dir/configs/resolved/eval.json"
     if [[ ! -f "$saved_config" ]]; then echo "Error: no saved run config at $saved_config"; exit 1; fi
+    python scripts/write_run_manifest.py --run_dir "$run_dir" --config "$saved_config" || echo "Warning: no run manifest written"
     vf-eval @ "$saved_config" --resume
 else
     if [[ "${ARGS["config"]}" == "none" ]]; then echo "Error: --config is required for a new run"; exit 1; fi
     base_url_args=()
     if [[ "${ARGS["base_url"]}" != "none" ]]; then base_url_args=(--client.base-url "${ARGS["base_url"]}"); fi
+    python scripts/write_run_manifest.py --run_dir "$run_dir" --config "${ARGS["config"]}" --base_url "${ARGS["base_url"]}" || echo "Warning: no run manifest written"
     vf-eval @ "${ARGS["config"]}" -o "$runs_dir" --run.name "$name" --env.checkpoint-dir "$run_dir/checkpoints" -r 1 "${base_url_args[@]}"
 fi

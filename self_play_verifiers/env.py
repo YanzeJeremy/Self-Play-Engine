@@ -2,15 +2,16 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 import verifiers.v1 as vf
 
 from self_play.chat_model import STOP_STRING, InteractionChatModel
-from self_play.checkpoint import checkpoint_path
+from self_play.checkpoint import checkpoint_path, run_fingerprint
 from self_play.game import THINK
 from self_play.games import GAMES
-from self_play.runner import Runner
+from self_play.prediction import SCHEMA_VERSION, SUM_TOLERANCE, WORST_BRIER, argmax_label, brier, log_loss
+from self_play.runner import TALK_WINDOW, Runner
 
 SEATS = tuple(f"seat{i}" for i in range(6))
 """Game players map to seats in order: the game's first player is seat0, and so on. Only
@@ -55,8 +56,29 @@ class SelfPlayEnvConfig(vf.EnvConfig):
     mean round result: 1 win, 0.5 draw, 0 loss), a denser signal that credits every round, not
     just who won more. Games without their own step rewards give every step the outcome, so
     there "moves" equals "game". The forfeit still applies on top."""
+    prediction_mode: Literal["off", "opponent_action_v1"] = "off"
+    """"off": every prompt exactly as before predictions existed. "opponent_action_v1": each
+    move call also asks for a probability forecast of the opponent's action this round (see
+    `self_play.prediction`). Forecasts are measured, never rewarded: they are written to
+    `trace.info["predictions"]` and as `prediction_*` metrics, and the reward is unchanged."""
     checkpoint_dir: str | None = None
     """Mid-game checkpoints (eval only; set by scripts/eval.sh). Needs one rollout per task."""
+    allow_legacy_checkpoints: bool = False
+    """Reuse checkpoints written before run fingerprints existed. Off: such a checkpoint is
+    refused, so an old condition's results are never returned for a new run."""
+
+
+    @model_validator(mode="after")
+    def unset_null_seat_sampling(self):
+        """A resumed eval reloads its saved config, where each seat's sampling lists every
+        field, unset ones as null. Seat sampling merges over the run's by *set* fields, so
+        those nulls would erase the run's temperature, top_p and max_tokens and every resumed
+        request would fall back to the server's defaults. Treat null as unset again."""
+        for name in SEATS:
+            seat = getattr(self, name)
+            if seat.sampling is not None:
+                seat.sampling = vf.SamplingConfig(**seat.sampling.model_dump(exclude_none=True))
+        return self
 
 
 class SelfPlayEnv(vf.Env[SelfPlayEnvConfig]):
@@ -93,7 +115,21 @@ class SelfPlayEnv(vf.Env[SelfPlayEnvConfig]):
                     seat_task = vf.Task(vf.TaskData(idx=task.data.idx, prompt=None))
                     interactions[player_id] = await stack.enter_async_context(getattr(agents, seat).interaction(seat_task))
                 models = {player_id: InteractionChatModel(interaction=i) for player_id, i in interactions.items()}
-                runner = Runner(game=game, models=models, max_retries=self.config.max_retries, checkpoint_path=path)
+                fingerprint = run_fingerprint(
+                    game=game,
+                    prediction_mode=self.config.prediction_mode,
+                    agents={seat: seat_identity(agent=getattr(agents, seat)) for seat in seats.values()},
+                    runner_settings={"max_retries": self.config.max_retries, "talk_window": TALK_WINDOW},
+                )
+                runner = Runner(
+                    game=game,
+                    models=models,
+                    max_retries=self.config.max_retries,
+                    checkpoint_path=path,
+                    prediction_mode=self.config.prediction_mode,
+                    fingerprint=fingerprint,
+                    allow_legacy_checkpoint=self.config.allow_legacy_checkpoints,
+                )
                 result = await runner.run()
         finally:
             self._active_checkpoints.discard(path)
@@ -109,6 +145,8 @@ class SelfPlayEnv(vf.Env[SelfPlayEnvConfig]):
             "invalid": result["invalid"],
             "record": runner.record,
         }
+        game_record["fingerprint"] = runner.fingerprint
+        decisions = runner.prediction_decisions()
         call_steps = runner.call_step_ids()
         calls = [entry for entry in runner.record if entry["kind"] == "call"]
         for player_id, interaction in interactions.items():
@@ -129,6 +167,16 @@ class SelfPlayEnv(vf.Env[SelfPlayEnvConfig]):
             trace.record_reward(self.config.reward_mode, reward)
             trace.record_metric("game_outcome", float(outcome_reward))
             trace.record_metric("invalid", float(result["invalid"][player_id]))
+            if self.config.prediction_mode != "off":
+                mine = [d for d in decisions if d["player_id"] == player_id]
+                trace.info["predictions"] = {
+                    "schema_version": SCHEMA_VERSION,
+                    "protocol": self.config.prediction_mode,
+                    "sum_tolerance": SUM_TOLERANCE,
+                    "decisions": mine,
+                }
+                for name, value in prediction_metrics(decisions=mine).items():
+                    trace.record_metric(name, value)
             # Every seat carries the whole game; step_rewards lists this player's calls in
             # call order with the step each led to and that step's reward.
             trace.info["game"] = {**game_record, "player_id": player_id}
@@ -141,3 +189,47 @@ class SelfPlayEnv(vf.Env[SelfPlayEnvConfig]):
                 for entry, step_id in zip(calls, call_steps, strict=True)
                 if entry["player_id"] == player_id
             ]
+
+
+def seat_identity(*, agent) -> dict[str, Any]:
+    """The resolved model, client type, renderer and sampling of a seat, as JSON values, for
+    the run fingerprint (endpoint URLs and keys left out)."""
+    config = getattr(agent, "config", None)
+    if config is None:  # test doubles carry no config
+        return {}
+    client = config.client
+    dump = lambda value: value.model_dump(mode="json", exclude_none=True) if value is not None else None
+    return {
+        "model": config.model,
+        "client_type": getattr(client, "type", None),
+        "renderer": dump(getattr(client, "renderer", None)),
+        "renderer_model_name": getattr(client, "renderer_model_name", None),
+        "sampling": dump(config.sampling),
+    }
+
+
+def prediction_metrics(*, decisions: list[dict[str, Any]]) -> dict[str, float]:
+    """Per-trace forecast metrics. Coverage counts valid forecasts over model decisions
+    (forced actions excluded); the proper scores average valid forecasts only, and the
+    coverage-adjusted Brier charges every other model decision the worst score, 2."""
+    scored = [d for d in decisions if d["action_source"] != "forced"]
+    valid = [d for d in scored if d["prediction_status"] == "valid" and d["observed_target"] is not None]
+    metrics = {
+        "prediction_decisions": float(len(scored)),
+        "prediction_coverage": len(valid) / len(scored) if scored else 0.0,
+    }
+    if valid:
+        briers = [brier(probs=d["prediction_probs"], observed=d["observed_target"], labels=tuple(d["prediction_labels"])) for d in valid]
+        metrics |= {
+            "prediction_brier": sum(briers) / len(briers),
+            "prediction_log_loss": sum(log_loss(probs=d["prediction_probs"], observed=d["observed_target"]) for d in valid) / len(valid),
+            "prediction_accuracy": sum(
+                argmax_label(probs=d["prediction_probs"], labels=tuple(d["prediction_labels"])) == d["observed_target"] for d in valid
+            ) / len(valid),
+        }
+    if scored:
+        metrics["prediction_brier_coverage_adjusted"] = (
+            sum(brier(probs=d["prediction_probs"], observed=d["observed_target"], labels=tuple(d["prediction_labels"])) for d in valid)
+            + WORST_BRIER * (len(scored) - len(valid))
+        ) / len(scored)
+    return metrics

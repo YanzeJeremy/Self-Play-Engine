@@ -3,6 +3,8 @@ observation hides."""
 
 from typing import Any
 
+from self_play.prompting import prediction_format
+
 RULES = """You are playing rock paper scissors against a computer opponent over {rounds} rounds.
 Each round you and the opponent choose at the same time: rock beats scissors, scissors beats paper,
 paper beats rock, and equal choices draw. Whoever wins more rounds wins the game.
@@ -34,3 +36,15 @@ def render_prompt(*, rules: str, observation: dict[str, Any]) -> str:
 
 def answer_request(*, legal_actions: list[str]) -> str:
     return f"Your answer is your move for this round: one of {', '.join(legal_actions)}."
+
+
+PREDICTION_REQUEST = (
+    "Before choosing your action, predict the opponent's action for this round using only the information "
+    "currently available to you. Express your uncertainty as probabilities over the possible opponent actions. "
+    "Put the probabilities in the prediction field, then choose your action according to the game's stated objective."
+)
+"""The forecast instruction (prediction mode opponent_action_v1). Names no opponent strategy."""
+
+
+def prediction_request(*, labels: tuple[str, ...]) -> str:
+    return f"{PREDICTION_REQUEST}\n{prediction_format(labels=labels)}"

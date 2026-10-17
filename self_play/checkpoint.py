@@ -3,8 +3,12 @@ the game, written atomically so a crash leaves the old file or the new one, neve
 
     <checkpoint_dir>/<hash>.json         the snapshot (see `Runner`)
     <checkpoint_dir>/meta_<hash>.yaml    the game and game_config the hash stands for
+
+The file name fixes the game; `run_fingerprint` fixes the run condition (prompts, model,
+sampling, runner settings), which the Runner checks before reusing a snapshot.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,3 +40,30 @@ def save_snapshot(*, path: Path, snapshot: dict[str, Any]) -> None:
 
 def load_snapshot(*, path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text()) if path.exists() else None
+
+
+FINGERPRINT_VERSION = 1
+
+
+def prompt_template_hash(*, game) -> str:
+    """sha256 over every engine prompt text and the game's own prompt templates."""
+    from self_play.prompting import prompt_templates  # imported here: prompting must not depend on checkpoint
+
+    texts = prompt_templates() + game.prompt_templates()
+    return hashlib.sha256(json.dumps(texts).encode()).hexdigest()
+
+
+def run_fingerprint(
+    *, game, prediction_mode: str, agents: dict[str, Any], runner_settings: dict[str, Any]
+) -> dict[str, Any]:
+    """What must match for a checkpoint to be reused: the prediction protocol, the prompt
+    templates, each seat's model/client/renderer/sampling (`agents`, JSON values), and the
+    runner settings that change play (retries, talk window). Endpoint URLs are left out, so a
+    run can resume against the same model served elsewhere."""
+    return json.loads(json.dumps({
+        "fingerprint_version": FINGERPRINT_VERSION,
+        "prediction_protocol": prediction_mode,
+        "prompt_template_hash": prompt_template_hash(game=game),
+        "agents": agents,
+        "runner": runner_settings,
+    }, sort_keys=True))

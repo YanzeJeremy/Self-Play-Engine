@@ -13,12 +13,19 @@ is exercised, and the opponent says one line per round:
     round 4, 8, ...  "claim"    SIMULTANEOUS     "I will play <move>.", true or a lie on a fair coin
 
 The player has a thinking turn before round 1 (every game's opening) and after every round.
+
+Prediction target "opponent_action": the opponent's move in the coming round, one of CHOICES.
+The decision id is the round index (from 0), read from the observation; the observed move is
+read from the round's history once it has been played (and announced).
 """
 
+import inspect
 from typing import Any
 
 from self_play.game import THINK, DialogueMode, DialoguePhase, Game
-from self_play.games.copycat_rps.prompts import answer_request, render_prompt, rules_text
+from self_play.games.copycat_rps import prompts
+from self_play.games.copycat_rps.prompts import answer_request, prediction_request, render_prompt, rules_text
+from self_play.prediction import PredictionSpec
 
 PLAYER = "player"
 CHOICES = ["rock", "paper", "scissors"]
@@ -141,6 +148,37 @@ class CopycatRPSGame(Game):
 
     def render_answer_request(self, *, legal_actions: list[Any]) -> str:
         return answer_request(legal_actions=legal_actions)
+
+    # --- predictions ---------------------------------------------------------------
+
+    prediction_targets = ("opponent_action",)
+
+    def get_prediction_spec(self, *, player_id: str, observation: dict[str, Any], target_id: str) -> PredictionSpec | None:
+        if target_id != "opponent_action" or player_id != PLAYER or observation["opponent_says"] is None:
+            return None
+        return PredictionSpec(
+            target_id="opponent_action",
+            description="the opponent's action for this round",
+            labels=tuple(CHOICES),
+            decision_id=observation["round"] - 1,
+        )
+
+    def resolve_prediction_target(self, *, player_id: str, step_id: int, target_id: str) -> str | None:
+        """The opponent's move in the round that step `step_id` played: public once played."""
+        if target_id != "opponent_action" or player_id != PLAYER:
+            return None
+        step = self.steps[step_id]
+        if step["player_id"] != PLAYER or step["action"] == THINK:
+            return None
+        round_index = sum(1 for earlier in self.steps[:step_id] if earlier["action"] != THINK)
+        history = self.state["history"]
+        return history[round_index]["opponent"] if round_index < len(history) else None
+
+    def render_prediction_request(self, *, spec: PredictionSpec) -> str:
+        return prediction_request(labels=spec.labels)
+
+    def prompt_templates(self) -> list[str]:
+        return super().prompt_templates() + [inspect.getsource(prompts)]
 
     def parse_answer(self, *, player_id: str, answer: str) -> Any:
         """The move as one word, any case, surrounding punctuation ignored."""

@@ -122,3 +122,78 @@ def test_pinned_seats_are_not_trainable():
     agents = fake_agents(interaction=None)
     asyncio.run(env.setup(agents))
     assert agents.seat0.trainable and not agents.seat1.trainable
+
+
+def predicting(answer):
+    return f"<thinking>scratch</thinking><prediction>{{\"rock\": 0.5, \"paper\": 0.25, \"scissors\": 0.25}}</prediction><answer>{answer}</answer>[STOP]"
+
+
+# Copycat over 2 rounds, prediction on: think, talk, move (with forecast), think, move (no forecast).
+PREDICTING_REPLIES = [reply(answer="notes"), reply(answer="SILENCE"), predicting("scissors"),
+                      reply(answer="NO CHANGE"), reply(answer="rock")]
+
+
+def test_prediction_mode_records_decisions_and_metrics_but_not_rewards():
+    plain = FakeInteraction(replies=REPLIES)
+    asyncio.run(make_env().run(TASK, fake_agents(interaction=plain)))
+    interaction = FakeInteraction(replies=PREDICTING_REPLIES)
+    asyncio.run(make_env(prediction_mode="opponent_action_v1").run(TASK, fake_agents(interaction=interaction)))
+    trace = interaction.trace
+    assert trace.rewards == plain.trace.rewards  # forecasts are never rewarded
+    predictions = trace.info["predictions"]
+    assert predictions["schema_version"] == 1 and predictions["protocol"] == "opponent_action_v1"
+    decisions = predictions["decisions"]
+    assert [d["prediction_status"] for d in decisions] == ["valid", "missing"]
+    assert [d["decision_id"] for d in decisions] == [0, 1]
+    assert decisions[1]["observed_target"] == "scissors"  # round 2: the copycat plays the round-1 move
+    assert trace.metrics["prediction_coverage"] == 0.5 and trace.metrics["prediction_decisions"] == 2.0
+    assert trace.metrics["prediction_brier_coverage_adjusted"] == (trace.metrics["prediction_brier"] + 2.0) / 2
+    assert "predictions" not in plain.trace.info and not any(k.startswith("prediction") for k in plain.trace.metrics)
+    assert trace.info["game"]["fingerprint"]["prediction_protocol"] == "opponent_action_v1"
+
+
+def test_prediction_metrics_on_known_forecasts():
+    from self_play_verifiers.env import prediction_metrics
+    labels = ["rock", "paper", "scissors"]
+    decisions = [
+        {"action_source": "model", "prediction_status": "valid", "observed_target": "rock", "prediction_labels": labels,
+         "prediction_probs": {"rock": 1.0, "paper": 0.0, "scissors": 0.0}},
+        {"action_source": "model", "prediction_status": "valid", "observed_target": "paper", "prediction_labels": labels,
+         "prediction_probs": {"rock": 1 / 3, "paper": 1 / 3, "scissors": 1 / 3}},
+        {"action_source": "fallback", "prediction_status": "invalid_json", "observed_target": "rock", "prediction_labels": labels,
+         "prediction_probs": None},
+        {"action_source": "forced", "prediction_status": None, "observed_target": "rock", "prediction_labels": None,
+         "prediction_probs": None},
+    ]
+    metrics = prediction_metrics(decisions=decisions)
+    assert metrics["prediction_decisions"] == 3.0  # the forced action is excluded
+    assert metrics["prediction_coverage"] == pytest.approx(2 / 3)
+    assert metrics["prediction_brier"] == pytest.approx((0 + 2 / 3) / 2)
+    assert metrics["prediction_accuracy"] == 0.5  # the uniform forecast's tie goes to "rock", but "paper" was observed
+    assert metrics["prediction_brier_coverage_adjusted"] == pytest.approx((0 + 2 / 3 + 2) / 3)
+
+
+def test_switching_condition_on_a_reused_checkpoint_dir_is_refused(tmp_path):
+    asyncio.run(make_env(checkpoint_dir=str(tmp_path)).run(TASK, fake_agents(interaction=FakeInteraction(replies=REPLIES))))
+    env = make_env(checkpoint_dir=str(tmp_path), prediction_mode="opponent_action_v1")
+    with pytest.raises(ValueError, match="different run condition"):
+        asyncio.run(env.run(TASK, fake_agents(interaction=FakeInteraction(replies=PREDICTING_REPLIES))))
+
+
+def test_a_reloaded_config_keeps_the_runs_sampling_for_every_seat():
+    # A resumed eval reloads the saved resolved config, where unset seat sampling fields are
+    # written out as null; they must not override the run's sampling.
+    import json as _json
+
+    from verifiers.v1.configs.agent import resolve_agent
+
+    import verifiers.v1 as vf
+    saved = _json.loads(make_env().config.model_dump_json())
+    assert saved["seat0"]["sampling"]["temperature"] is None  # what the saved file holds
+    reloaded = SelfPlayEnvConfig.model_validate(saved)
+    run_sampling = vf.SamplingConfig(temperature=0.0, top_p=0.95, max_tokens=2048, top_k=64)
+    for config in (make_env().config, reloaded):
+        seat = resolve_agent(config.seat0, model="m", sampling=run_sampling)
+        assert seat.sampling.model_dump(exclude_none=True) == {
+            "temperature": 0.0, "top_p": 0.95, "max_tokens": 2048, "top_k": 64, "stop": ["[STOP]"],
+        }
