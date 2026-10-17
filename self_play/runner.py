@@ -32,7 +32,9 @@ a finished game from another condition is never returned as this one's result. S
 written before fingerprints existed are refused unless `allow_legacy_checkpoint` is set.
 
 Every call gets a `call_id` ("call-<n>", n counting the game's calls from 0), the same when
-the call is replayed from a checkpoint.
+the call is replayed from a checkpoint. When the model reports them, a call's provider details
+(token usage, finish reason, timing) are stored in its entry as `call_info`, so a resumed
+game's record still accounts for every call.
 
 Predictions (`prediction_mode`, see `self_play.prediction`): move calls also ask for a
 forecast of the game's target. The forecast is parsed into the call's record entry and
@@ -49,7 +51,14 @@ from typing import Any
 from self_play.chat_model import ChatModel
 from self_play.checkpoint import load_snapshot, save_snapshot
 from self_play.game import THINK, DialogueMode, DialoguePhase, Game, StepResult
-from self_play.prediction import PREDICTION_MODES, SCHEMA_VERSION, TARGET_FOR_MODE, PredictionSpec, parse_prediction
+from self_play.prediction import (
+    PREDICTION_MODES,
+    SCHEMA_VERSION,
+    TARGET_FOR_MODE,
+    ParsedPrediction,
+    PredictionSpec,
+    parse_prediction,
+)
 from self_play.prompting import (
     NO_CHANGE,
     PREDICTION_SYSTEM_PROMPT,
@@ -382,7 +391,9 @@ class Runner:
         )
         entry = self._take_replay(player_id=player_id, kind=kind, messages=messages)
         if entry is None:
-            reply = await self.models[player_id].complete(messages=messages)
+            model = self.models[player_id]
+            reply = await model.complete(messages=messages)
+            call_info = model.last_call  # read before any other await: this call's provider details
             thinking, answer = parse_reply(reply=reply)
             entry = {
                 "kind": "call",
@@ -396,9 +407,14 @@ class Runner:
                 "thinking": thinking,
                 "answer": answer,
             }
+            if call_info is not None:
+                entry["call_info"] = call_info  # usage, finish reason, timing: kept through resume
             if spec is not None:
-                parsed = parse_prediction(reply=reply, labels=spec.labels)
-                entry["prediction"] = {"protocol": self.prediction_mode, **spec.to_dict(), **parsed.to_dict()}
+                try:
+                    parsed = parse_prediction(reply=reply, labels=spec.labels).to_dict()
+                except Exception as error:  # a forecast must never break the move: record and carry on
+                    parsed = {**ParsedPrediction(status="parser_error").to_dict(), "error": repr(error)}
+                entry["prediction"] = {"protocol": self.prediction_mode, **spec.to_dict(), **parsed}
         elif entry.setdefault("call_id", call_id) != call_id:
             raise RuntimeError(f"resuming {self.checkpoint_path}: replayed call {entry['call_id']} arrived as {call_id}")
         self._journal.append(dict(entry))

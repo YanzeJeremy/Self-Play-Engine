@@ -12,8 +12,12 @@
 #   primary  eval_configs/prediction_{b0,b1}_{t0,t1}_r10.toml
 #   long     eval_configs/prediction_{b0,b1}_{t0,t1}_r100.toml (measure smoke/primary costs first)
 # Runs are named rps-predv1-<b0|b1>-<model_tag>-<t0|t1>-r<rounds>-n<games> (smoke: ...-smoke), each with its own
-# checkpoint folder. A finished run is skipped; an unfinished one is resumed. Analysis goes to
-# $storage_dir/eval_runs/predv1-<stage>-<model_tag>-analysis.json.
+# checkpoint folder. An existing run is first checked to be the requested condition (scripts/run_identity.py
+# check; a mismatch stops the script: use another --model_tag or move the old run away). Then a complete run is
+# skipped and an unfinished one resumed, with --base_url moving it to the current server if needed. After each
+# condition the run must hold every configured game, finished (run_identity.py complete), or the script stops
+# with exit 1 before any analysis. The paired analysis refuses incomplete or mismatched pairs. It goes to
+# $storage_dir/eval_runs/predv1-<stage>-<model_tag>-...-analysis.json.
 
 source scripts/utils.sh || { echo "Could not source utils"; exit 1; }
 
@@ -69,52 +73,57 @@ done
 # Script logic below:
 stage="${ARGS["stage"]}"
 tag="${ARGS["model_tag"]}"
-runs_dir="$storage_dir/eval_runs"
+runs_dir="${EVAL_RUNS_DIR:-$storage_dir/eval_runs}"     # EVAL_RUNS_DIR, EVAL_SCRIPT and PREDV1_CONFIG_DIR exist for tests
+eval_script="${EVAL_SCRIPT:-scripts/eval.sh}"
+configs="${PREDV1_CONFIG_DIR:-eval_configs}"
 
-finished() {  # finished <run name> <games>: all games in traces.jsonl ended without error
-    local traces="$runs_dir/$1/traces.jsonl"
-    [[ -f "$traces" ]] && python -c "import json,sys; rows=[json.loads(l) for l in open(sys.argv[1])]; sys.exit(0 if len(rows)>=int(sys.argv[2]) and all(r.get('ok') for r in rows) else 1)" "$traces" "$2"
-}
+fail() { echo "Error: $*"; exit 1; }
 
-run_condition() {  # run_condition <config> <run name> <games>
-    local config="$1" name="$2" games="$3"
-    if finished "$name" "$games"; then echo "== $name: already finished, skipping"; return 0; fi
-    if [[ -f "$runs_dir/$name/configs/resolved/eval.json" ]]; then
+is_complete() { python scripts/run_identity.py complete --run_dir "$runs_dir/$1"; }
+
+run_condition() {  # run_condition <config> <run name>: leaves the run complete, or stops the script
+    local config="$1" name="$2" run_dir="$runs_dir/$2"
+    if [[ -f "$run_dir/configs/resolved/eval.json" ]]; then
+        python scripts/run_identity.py check --run_dir "$run_dir" --config "$config" || fail "$name exists but is another condition"
+        if is_complete "$name" > /dev/null; then echo "== $name: complete, skipping"; return 0; fi
         echo "== $name: resuming"
-        bash scripts/eval.sh --name "$name" --resume true
+        bash "$eval_script" --name "$name" --resume true --base_url "${ARGS["base_url"]}" || fail "evaluation of $name failed (exit $?)"
     else
         echo "== $name: starting"
-        bash scripts/eval.sh --config "$config" --name "$name" --base_url "${ARGS["base_url"]}"
+        bash "$eval_script" --config "$config" --name "$name" --base_url "${ARGS["base_url"]}" || fail "evaluation of $name failed (exit $?)"
     fi
+    is_complete "$name" || fail "$name is incomplete after evaluation; rerun this script to resume it"
 }
 
 pairs=()
 case "$stage" in
     smoke)
         b0="rps-predv1-b0-$tag-t0-r6-n3-smoke"; b1="rps-predv1-b1-$tag-t0-r6-n3-smoke"
-        run_condition eval_configs/prediction_smoke_b0.toml "$b0" 3
-        if ! finished "$b1" 3 && [[ ! -d "$runs_dir/$b1" ]]; then
+        run_condition "$configs/prediction_smoke_b0.toml" "$b0"
+        if [[ ! -d "$runs_dir/$b1" ]]; then
+            # deliberate interruption, to exercise resume: the only evaluation allowed to stop early
             echo "== $b1: starting, to be interrupted after ${ARGS["interrupt_after"]}s"
-            timeout --signal=INT "${ARGS["interrupt_after"]}" bash scripts/eval.sh --config eval_configs/prediction_smoke_b1.toml --name "$b1" --base_url "${ARGS["base_url"]}"
+            timeout --signal=INT "${ARGS["interrupt_after"]}" bash "$eval_script" --config "$configs/prediction_smoke_b1.toml" --name "$b1" --base_url "${ARGS["base_url"]}"
             echo "== $b1: interrupted (exit $?); checkpoints: $(ls "$runs_dir/$b1/checkpoints"/*.json 2>/dev/null | wc -l)"
         fi
-        run_condition eval_configs/prediction_smoke_b1.toml "$b1" 3
+        run_condition "$configs/prediction_smoke_b1.toml" "$b1"
         pairs+=("$b0 $b1")
         ;;
     primary|long)
         if [[ "$stage" == "primary" ]]; then rounds=10; games=100; else rounds=100; games=20; fi
         for t in t0 t1; do
             b0="rps-predv1-b0-$tag-$t-r$rounds-n$games"; b1="rps-predv1-b1-$tag-$t-r$rounds-n$games"
-            run_condition "eval_configs/prediction_b0_${t}_r${rounds}.toml" "$b0" "$games"
-            run_condition "eval_configs/prediction_b1_${t}_r${rounds}.toml" "$b1" "$games"
+            run_condition "$configs/prediction_b0_${t}_r${rounds}.toml" "$b0"
+            run_condition "$configs/prediction_b1_${t}_r${rounds}.toml" "$b1"
             pairs+=("$b0 $b1")
         done
         ;;
-    *) echo "Error: --stage must be smoke, primary or long"; exit 1 ;;
+    *) fail "--stage must be smoke, primary or long" ;;
 esac
 
 for pair in "${pairs[@]}"; do
     read -r b0 b1 <<< "$pair"
     python scripts/analyze_copycat_games.py --pair "$runs_dir/$b0/traces.jsonl" "$runs_dir/$b1/traces.jsonl" \
-        --json_out "$runs_dir/predv1-$stage-$tag-${b0#rps-predv1-b0-$tag-}-analysis.json"
+        --json_out "$runs_dir/predv1-$stage-$tag-${b0#rps-predv1-b0-$tag-}-analysis.json" || fail "paired analysis of $b0 / $b1 refused"
 done
+echo "== all conditions complete; paired analyses written"

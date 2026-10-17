@@ -25,7 +25,7 @@ REPLIES = [reply(answer="notes"), reply(answer="SILENCE"), reply(answer="scissor
 
 class FakeTrace:
     def __init__(self):
-        self.rewards, self.metrics, self.info = {}, {}, {}
+        self.rewards, self.metrics, self.info, self.calls = {}, {}, {}, []
 
     def record_reward(self, name, value, weight=1.0):
         self.rewards[name] = value
@@ -45,6 +45,11 @@ class FakeInteraction:
         if self.turns == self.fail_at:
             return SimpleNamespace(terminated=True, last_reply="")
         self.turns += 1
+        # like verifiers: each provider exchange lands in trace.calls before the turn returns
+        self.trace.calls.append(SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=100 + self.turns, cached_input_tokens=0, completion_tokens=10),
+            finish_reason="stop", time=SimpleNamespace(start=float(self.turns), end=self.turns + 0.5),
+        ))
         return SimpleNamespace(terminated=False, last_reply=self.replies.pop(0))
 
 
@@ -113,7 +118,8 @@ def test_a_crashed_game_resumes_from_its_checkpoint(tmp_path):
     assert game["resumed"]
     reference = FakeInteraction(replies=REPLIES)
     asyncio.run(make_env().run(TASK, fake_agents(interaction=reference)))
-    assert game["record"] == reference.trace.info["game"]["record"]
+    without_provider_details = lambda record: [{k: v for k, v in e.items() if k != "call_info"} for e in record]
+    assert without_provider_details(game["record"]) == without_provider_details(reference.trace.info["game"]["record"])
     assert rest.trace.rewards == reference.trace.rewards
 
 
@@ -197,3 +203,16 @@ def test_a_reloaded_config_keeps_the_runs_sampling_for_every_seat():
         assert seat.sampling.model_dump(exclude_none=True) == {
             "temperature": 0.0, "top_p": 0.95, "max_tokens": 2048, "top_k": 64, "stop": ["[STOP]"],
         }
+
+
+def test_every_call_keeps_its_provider_details_through_a_resume(tmp_path):
+    env = make_env(checkpoint_dir=str(tmp_path))
+    with pytest.raises(ModelCallFailed):
+        asyncio.run(env.run(TASK, fake_agents(interaction=FakeInteraction(replies=REPLIES, fail_at=3))))
+    rest = FakeInteraction(replies=REPLIES[3:])
+    asyncio.run(make_env(checkpoint_dir=str(tmp_path)).run(TASK, fake_agents(interaction=rest)))
+    calls = [e for e in rest.trace.info["game"]["record"] if e["kind"] == "call"]
+    assert len(calls) == len(REPLIES) and len(rest.trace.calls) == len(REPLIES) - 3  # this trace saw only the last 2
+    infos = [e["call_info"] for e in calls]
+    assert [i["prompt_tokens"] for i in infos] == [101, 102, 103, 101, 102]  # 3 before the crash, 2 after
+    assert all(i["completion_tokens"] == 10 and i["finish_reason"] == "stop" and i["provider_calls"] == 1 for i in infos)

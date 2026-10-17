@@ -14,7 +14,14 @@ action consistency (expected-payoff gap between the chosen move and the best mov
 forecast). Runs without predictions report those as unavailable.
 
 --pair compares two runs game by game on matching seeds (paired differences, 95% bootstrap
-intervals over games). --json_out writes every summary and per-game row as JSON.
+intervals over games). It refuses (exit 1) unless both runs are complete (every configured
+seed finished, with the configured rounds) and are the same condition except
+`env.prediction_mode` (scripts/run_identity.py); --exploratory reports anyway, labeled so.
+--json_out writes every summary and per-game row as JSON.
+
+Costs come from each call's `call_info` in the game record, which survives checkpoint resume.
+For older runs without it, the trace's own calls are used only when they cover every call of
+the game; otherwise the game's costs are marked incomplete and left out of the totals.
 """
 
 import json
@@ -23,7 +30,13 @@ import random
 import re
 from collections import Counter
 
+import sys
+from pathlib import Path
+
 import click
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_identity import PROTOCOL_FIELD, completeness, differences, run_identity  # noqa: E402
 
 LABELS = ("rock", "paper", "scissors")
 BEATEN_BY = {"scissors": "rock", "rock": "paper", "paper": "scissors"}
@@ -126,17 +139,30 @@ def forecast_rows(*, predictions):
     return rows
 
 
+def call_costs(*, game, trace_calls):
+    """(per-call provider details for every call of the game, complete?)."""
+    entries = [e for e in game["record"] if e["kind"] == "call"]
+    if entries and all("call_info" in e for e in entries):
+        return [e["call_info"] for e in entries], True
+    if not game.get("resumed") and len(trace_calls) == len(entries):  # an older run that was never resumed
+        return [{"prompt_tokens": (c.get("usage") or {}).get("prompt_tokens"),
+                 "cached_input_tokens": (c.get("usage") or {}).get("cached_input_tokens"),
+                 "completion_tokens": (c.get("usage") or {}).get("completion_tokens"),
+                 "finish_reason": c.get("finish_reason"),
+                 "start": (c.get("time") or {}).get("start"), "end": (c.get("time") or {}).get("end")} for c in trace_calls], True
+    return [], False
+
+
 def episode_metrics(*, episode):
-    game, calls = episode["game"], episode["calls"]
+    game = episode["game"]
     results, moves = round_results(game=game), moves_of(game=game)
     n = len(results)
     later = results[1:]
     rotation = [b == BEATEN_BY[a] for a, b in zip(moves, moves[1:])]
     sources = Counter(e["source"] for e in game["record"] if e["kind"] == "action" and e["accepted"])
-    usage = [c.get("usage") or {} for c in calls]
-    times = [c.get("time") or {} for c in calls]
-    starts = [t["start"] for t in times if t.get("start")]
-    ends = [t["end"] for t in times if t.get("end")]
+    costs, costs_complete = call_costs(game=game, trace_calls=episode["calls"])
+    cost_sum = lambda key: sum(c.get(key) or 0 for c in costs) if costs_complete else None
+    spans = [(c["start"], c["end"]) for c in costs if c.get("start") and c.get("end")]
     row = {
         "seed": game["game_config"]["seed"],
         "rounds": n,
@@ -151,10 +177,13 @@ def episode_metrics(*, episode):
         "fallback_moves": sources.get("fallback", 0),
         "calls": sum(1 for e in game["record"] if e["kind"] == "call"),
         "reply_chars": sum(len(e["reply"] or "") for e in game["record"] if e["kind"] == "call"),
-        "input_tokens": sum(u.get("prompt_tokens", 0) + (u.get("cached_input_tokens") or 0) for u in usage) if usage else None,
-        "output_tokens": sum(u.get("completion_tokens", 0) for u in usage) if usage else None,
-        "truncated_calls": sum(1 for c in calls if c.get("finish_reason") == "length"),
-        "wall_seconds": max(ends) - min(starts) if starts and ends else None,
+        "costs_complete": costs_complete,
+        "resumed": bool(game.get("resumed")),
+        "input_tokens": cost_sum("prompt_tokens") + cost_sum("cached_input_tokens") if costs_complete else None,
+        "output_tokens": cost_sum("completion_tokens"),
+        "truncated_calls": sum(1 for c in costs if c.get("finish_reason") == "length") if costs_complete else None,
+        "model_seconds": sum(end - start for start, end in spans) if costs_complete and spans else None,
+        "wall_seconds": (max(e for _, e in spans) - min(s for s, _ in spans)) if costs_complete and spans and not game.get("resumed") else None,
         "copy_mentions": sum(
             1 for e in game["record"] if e["kind"] == "call"
             and COPY_MENTION.search((e.get("thinking") or "") + " " + (e.get("answer") or ""))
@@ -205,9 +234,12 @@ def summarize(*, rows):
         "fallback_moves": total("fallback_moves"),
         "calls": total("calls"),
         "mean_reply_chars_per_call": total("reply_chars") / max(total("calls"), 1),
-        "input_tokens": sum(r["input_tokens"] or 0 for r in rows),
-        "output_tokens": sum(r["output_tokens"] or 0 for r in rows),
-        "truncated_calls": total("truncated_calls"),
+        "cost_games_complete": f"{sum(r['costs_complete'] for r in rows)} of {len(rows)}"
+        + ("" if all(r["costs_complete"] for r in rows) else " (INCOMPLETE: the cost totals below cover only these games)"),
+        "input_tokens": sum(r["input_tokens"] for r in rows if r["costs_complete"]) if any(r["costs_complete"] for r in rows) else None,
+        "output_tokens": sum(r["output_tokens"] for r in rows if r["costs_complete"]) if any(r["costs_complete"] for r in rows) else None,
+        "truncated_calls": sum(r["truncated_calls"] for r in rows if r["costs_complete"]) if any(r["costs_complete"] for r in rows) else None,
+        "mean_model_seconds_per_game": mean(r["model_seconds"] for r in rows),
         "mean_wall_seconds_per_game": mean(r["wall_seconds"] for r in rows),
         "copy_mentions": total("copy_mentions"),
         "later_rounds": later_rounds,
@@ -294,7 +326,8 @@ def paired(*, rows_a, rows_b):
 @click.option("--pair", "pair", nargs=2, default=None, help="Two traces.jsonl (A then B): paired B - A by seed.")
 @click.option("--show", default=0, show_default=True, help="Games to print in detail per run.")
 @click.option("--json_out", default=None, help="Write all summaries and per-game rows here as JSON.")
-def main(paths, pair, show, json_out):
+@click.option("--exploratory", is_flag=True, help="Pair runs even if incomplete or not the same condition (labeled).")
+def main(paths, pair, show, json_out, exploratory):
     output = {"runs": {}, "paired": None}
     for path in list(paths) + [p for p in (pair or ()) if p not in paths]:
         episodes, unfinished = load_episodes(path=path)
@@ -313,20 +346,53 @@ def main(paths, pair, show, json_out):
             for d in (episode["predictions"] or {}).get("decisions", [])[:5]:
                 print(f"    round {d['decision_id']}: forecast {d['prediction_probs']} ({d['prediction_status']}) "
                       f"-> played {d['executed_action']}, opponent {d['observed_target']}")
+    refused = False
     if pair:
         a, b = pair
-        if a in output["runs"] and b in output["runs"]:
-            output["paired"] = {"a": a, "b": b, **paired(rows_a=output["runs"][a]["games"], rows_b=output["runs"][b]["games"])}
-            print(f"\n=== paired: B - A by seed\n  A = {a}\n  B = {b}")
+        problems = pair_problems(a=a, b=b)
+        if problems and not exploratory:
+            refused = True
+            print("\nError: refusing the paired comparison (use --exploratory to report it anyway, labeled):")
+            for problem in problems:
+                print(f"  {problem}")
+        elif a in output["runs"] and b in output["runs"]:
+            output["paired"] = {"a": a, "b": b, "exploratory": bool(problems), "problems": problems,
+                                **paired(rows_a=output["runs"][a]["games"], rows_b=output["runs"][b]["games"])}
+            label = " (EXPLORATORY: " + "; ".join(problems) + ")" if problems else ""
+            print(f"\n=== paired: B - A by seed{label}\n  A = {a}\n  B = {b}")
             for key, value in output["paired"].items():
                 if isinstance(value, dict):
                     print(f"  {key}: {value['mean_diff']:+.3f}  95% CI [{value['ci95'][0]:+.3f}, {value['ci95'][1]:+.3f}]  ({value['games']} games)")
-                elif key not in ("a", "b"):
+                elif key not in ("a", "b", "exploratory", "problems"):
                     print(f"  {key}: {value}")
-    if json_out:
+    if json_out and not refused:
         with open(json_out, "w") as f:
             json.dump(output, f, indent=1)
         print(f"\nwrote {json_out}")
+    if refused:
+        sys.exit(1)
+
+
+def pair_problems(*, a, b):
+    """Why two runs cannot be compared as a B0/B1 pair: incomplete, or not the same condition
+    apart from the prediction mode."""
+    problems = []
+    dirs = {name: Path(path).parent for name, path in (("A", a), ("B", b))}
+    identities = {}
+    for name, run_dir in dirs.items():
+        try:
+            identities[name] = run_identity(run_dir=run_dir)
+            status = completeness(run_dir=run_dir)
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            problems.append(f"{name} ({run_dir.name}): no verifiable run identity ({error})")
+            continue
+        if not status["complete"]:
+            problems.append(f"{name} ({run_dir.name}) incomplete: " + "; ".join(status["problems"]))
+    if len(identities) == 2:
+        diffs = differences(a=identities["A"], b=identities["B"], ignore=(PROTOCOL_FIELD,))
+        if diffs:
+            problems.append("A and B differ beyond env.prediction_mode: " + "; ".join(diffs))
+    return problems
 
 
 if __name__ == "__main__":

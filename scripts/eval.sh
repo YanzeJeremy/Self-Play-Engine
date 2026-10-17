@@ -4,6 +4,7 @@
 #   bash scripts/eval.sh --config eval_configs/smoke.toml --name smoke-001
 #   bash scripts/eval.sh --config eval_configs/smoke.toml --name smoke-001 --base_url http://<node>:8000/v1
 #   bash scripts/eval.sh --name smoke-001 --resume true      # continue an interrupted run
+#   bash scripts/eval.sh --name smoke-001 --resume true --base_url http://<new node>:8000/v1   # ... against a moved server
 #
 # The run lands in $storage_dir/eval_runs/<name>/ (vf-eval's traces.jsonl, configs/, logs/, and
 # manifests/<time>.json from scripts/write_run_manifest.py, one per invocation)
@@ -68,12 +69,17 @@ name="${ARGS["name"]}"
 if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "Error: --name may use only letters, digits, '.', '_' and '-'"; exit 1
 fi
-runs_dir="$storage_dir/eval_runs"
+runs_dir="${EVAL_RUNS_DIR:-$storage_dir/eval_runs}"   # EVAL_RUNS_DIR: tests only
 run_dir="$runs_dir/$name"
 
 if [[ "${ARGS["resume"]}" == "true" || "${ARGS["resume"]}" == "yes" || "${ARGS["resume"]}" == "y" ]]; then
     saved_config="$run_dir/configs/resolved/eval.json"
     if [[ ! -f "$saved_config" ]]; then echo "Error: no saved run config at $saved_config"; exit 1; fi
+    # vf-eval resumes only under the exact saved config, endpoint included: a moved server is
+    # written into the saved config first (checked to serve the run's model, and recorded)
+    if [[ "${ARGS["base_url"]}" != "none" ]]; then
+        python scripts/migrate_endpoint.py --run_dir "$run_dir" --base_url "${ARGS["base_url"]}" || exit 1
+    fi
     python scripts/write_run_manifest.py --run_dir "$run_dir" --config "$saved_config" || echo "Warning: no run manifest written"
     vf-eval @ "$saved_config" --resume
 else

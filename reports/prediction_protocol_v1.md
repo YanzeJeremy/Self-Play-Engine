@@ -15,11 +15,14 @@ Training (M3+) is not part of this branch. The plan gates it on validated B0/B1 
 | `self_play/runner.py` | `prediction_mode`, a `call_id` per call (stable through replay), forecasts parsed into move-call entries, `prediction_decisions()`, and a run fingerprint saved in and checked against snapshots. |
 | `self_play/checkpoint.py` | `run_fingerprint()` and `prompt_template_hash()`. |
 | `self_play_verifiers/env.py` | Config `prediction_mode` (default `off`) and `allow_legacy_checkpoints` (default false). Fingerprints from each seat's resolved model, client type, renderer and sampling. `trace.info["predictions"]` plus `prediction_*` metrics. Rewards are untouched. |
-| `scripts/eval.sh` | Writes `manifests/<time>.json` via `scripts/write_run_manifest.py` before every vf-eval invocation. |
+| `scripts/eval.sh` | Writes `manifests/<time>.json` via `scripts/write_run_manifest.py` before every vf-eval invocation. `--resume true --base_url <new>` moves a run to a new server first (`scripts/migrate_endpoint.py`). |
+| `self_play/chat_model.py`, `runner.py` | Each call's provider details (token usage, finish reason, timing) are stored in its record entry as `call_info`, so they survive checkpoint resume. |
+| `scripts/run_identity.py` (new) | A run's identity (the condition) and its completeness. Used by the stage script and the paired analysis. |
+| `scripts/migrate_endpoint.py` (new) | Rewrites only `client.base_url` of a run's saved config, after confirming the new server serves the run's model. Records the change in `configs/endpoint_history.json`. |
 | `scripts/write_run_manifest.py` (new) | Commits and dirty flags (root, prime-rl, verifiers), the eval config, protocol constants and template hash, the server's `/v1/models` and `/version`, and from the HF cache the model revision, generation-config defaults and chat-template hash. |
 | `scripts/analyze_copycat_games.py` | The legacy summaries are kept. Added: forecast coverage with every status, accuracy, Brier, log loss (with the number of zero-probability observations), coverage-adjusted Brier, action consistency, adaptation windows, output costs, per-game rows, `--pair` (paired by seed, bootstrap 95% CI over games) and `--json_out`. |
 | `self_play_verifiers/env.py`, resume fix | Seat sampling fields saved as `null` are treated as unset when a config is reloaded (see section 6). |
-| `scripts/run_prediction_baseline.sh` (new) | Runs a stage (`smoke` / `primary` / `long`) of B0/B1 conditions, then the paired analysis. |
+| `scripts/run_prediction_baseline.sh` (new) | Runs a stage (`smoke` / `primary` / `long`) of B0/B1 conditions, then the paired analysis. Stops on any failed or incomplete evaluation, and on reuse of a run under another condition. |
 | `eval_configs/prediction_*.toml` (new) | Smoke (3 games × 6 rounds); primary B0/B1 × t0/t1 (100 × 10, 2,048 tokens); long B0/B1 × t0/t1 (20 × 100, 4,096 tokens). `top_p = 0.95` and `top_k = 64` are pinned in every config. |
 
 ## 2. Protocol behavior
@@ -64,12 +67,13 @@ Training (M3+) is not part of this branch. The plan gates it on validated B0/B1 
 
 ## 3. Tests
 
-`pytest tests/`: **107 passed, 1 failed.** The failure is pre-existing and not caused by this branch: `tests/test_env.py::test_a_game_runs_through_seat0_and_fills_its_trace` expects no `game_outcome` metric, which commit `13cd059` added.
+`pytest tests/`: **129 passed, 1 failed** (`-m "not workflow"` skips the slow script tests: 114 passed). The failure is pre-existing and not caused by this branch: `tests/test_env.py::test_a_game_runs_through_seat0_and_fills_its_trace` expects no `game_outcome` metric, which commit `13cd059` added.
 
 | Test file | Covers |
 |---|---|
 | `tests/test_prediction.py` | Parser boundary cases and scores on known distributions (uniform Brier 2/3, log-loss floor, argmax ties). |
 | `tests/test_prediction_protocol.py` | Off-mode prompts equal the recorded legacy prompts. Prediction mode changes only move calls. The request names no strategy. Forecasts never reach later prompts. The round-1 forecast prompt doesn't depend on the hidden opening. Forecast validity never changes the game. Forecast-to-decision association with thinking, retries, fallbacks and two-player simultaneous play. Call ids. Unsupported games and modes are refused. Resume after a crash at several points gives an identical record and decisions. Finished checkpoints are refused under changed protocol, model, sampling or retries. Legacy checkpoints need permission. The template hash follows prompt texts. |
+| `tests/test_baseline_workflow.py` (`workflow` marker; a few minutes) | Identity: each condition field changes it, the endpoint and concurrency don't, and a run without a manifest matches nothing. Incomplete runs are detected: missing seed, errored row, duplicate, short game, unexpected seed. Paired analysis refuses incomplete or mismatched runs, and `--exploratory` labels them. The stage script stops on failed or partial evaluations and on a changed condition, without regenerating old comparisons, and resumes against a new `--base_url`. Endpoint migration only moves to a server of the run's model, changes nothing else, and is recorded. `eval.sh` resume refuses an unconfirmed server. Uses `tests/fake_runs.py` and `tests/stub_eval.sh`. |
 | `tests/test_env.py` (added tests) | `trace.info["predictions"]` and metrics written and rewards unchanged. Metric values on known forecasts. Switching condition on a reused checkpoint directory is refused. A reloaded (resumed) config keeps the run's sampling. |
 
 ## 4. Running the M2 baseline
@@ -84,8 +88,10 @@ bash scripts/run_prediction_baseline.sh --stage primary --base_url http://<node>
 bash scripts/run_prediction_baseline.sh --stage long    --base_url http://<node>:8000/v1
 ```
 
-- **Run names:** `rps-predv1-<b0|b1>-gemma31b-<t0|t1>-r<rounds>-n<games>`, each with a fresh checkpoint folder.
-- **Rerunning the script** skips finished runs and resumes unfinished ones.
+- **Run names:** `rps-predv1-<b0|b1>-<model_tag>-<t0|t1>-r<rounds>-n<games>`, each with a fresh checkpoint folder.
+- **Rerunning the script** first checks that every existing run is the requested condition (a mismatch stops it), then skips complete runs and resumes unfinished ones against `--base_url`.
+- **A failed or incomplete evaluation stops the script** with exit 1 before any analysis. "Complete" means every seed 0..N−1 finished once, without error, with the configured rounds.
+- **The paired analysis** refuses incomplete pairs, and pairs that differ in anything but `env.prediction_mode`.
 - **Analysis:** paired B1 − B0 results go to `$storage_dir/eval_runs/predv1-<stage>-…-analysis.json`, and the console shows the summary.
 - **Any single run:**
   ```bash
@@ -124,7 +130,25 @@ Run with `scripts/run_prediction_baseline.sh --stage smoke` against the live ser
 
 **For future runs:** the run fingerprint now catches such drift, because a resume under different sampling is refused. The manifests and the per-call `sampling` recorded in traces make it auditable.
 
-## 7. Not done here
+## 7. Review fixes after `aaf998e`
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | Failed evaluations could still produce a paired comparison. | The stage script propagates eval failures and requires each run to be complete (`run_identity.py complete`). The analyzer's `--pair` refuses incomplete runs (exit 1, no JSON written). Only the smoke stage's deliberate interruption may stop early, and it must then be completed by the resume. |
+| 2 | Reusing a run bypassed the requested condition. | Before skipping or resuming, `run_identity.py check` compares the requested TOML with the saved run. The comparison covers model, client type, sampling, game selection, the env settings that change play, seats' pins and the prompt-template hash; it excludes endpoint, concurrency and checkpoint path. The paired analyzer checks that the two runs differ only in `env.prediction_mode`. |
+| 3 | Resumed runs under-reported tokens, truncation and time. | Per-call `call_info` is kept in the checkpointed record. The analyzer uses it, or older traces only when they cover every call; otherwise a game's costs are marked incomplete and excluded, with "x of n games" shown. Wall time is reported only for runs that were never resumed; model time is summed per call. |
+| 4 | Resume ignored a replacement server address. | vf-eval refuses `--resume` unless the config is exactly the saved one, endpoint included, so an override cannot work. `eval.sh --resume true --base_url <new>` therefore migrates the endpoint: it confirms the new server serves the run's model, records the move, rewrites only `client.base_url`, and then resumes. The stage script forwards `--base_url` on resume, and the manifest records the endpoint used. |
+| 5 | Some invalid forecasts crashed the game. | The range check now comes before any float conversion, so huge integers are `invalid_values`. Over-long integers, over-deep nesting and NaN are `invalid_json`. A runner safety net records any parser exception as `parser_error`, and the move goes ahead. |
+
+**Smoke check of the fixes (`--model_tag gemma31b-v2`, live server).**
+- B1 was interrupted after 60 s and resumed.
+- Each resumed trace held only 7–9 provider calls, yet the record kept `call_info` for all 15 calls of every game. B1's costs are complete: 3 of 3 games, 23,117 input and 13,387 output tokens; B0's are 21,477 and 12,540.
+- Both runs passed the completeness check, and the pair passed the identity check.
+- In the first smoke run (section 5), B1 was resumed before `call_info` existed. The analyzer now reports its costs as incomplete (0 of 3 games) rather than under-counting them.
+
+**Endpoint move, end to end.** A copy of a smoke run was given a dead saved endpoint and one game removed. An unreachable target was refused. Moving to the live server was recorded, and the resume replayed the removed game live: 15 calls with `call_info`, and the run is complete.
+
+## 8. Not done here
 
 - Seed manifests or disjoint seed ranges for the taskset. Every eval uses seeds `0..N-1`, so B0 and B1 are matched; the split for training data comes in M3.
 - A prediction dataset, warm-up SFT, RL arms or adaptation suites (M3–M6).

@@ -50,6 +50,7 @@ STATUSES = (
     "invalid_labels",   # keys are not exactly the target's labels
     "invalid_values",   # a value is not a finite number in [0, 1] (booleans are not numbers)
     "invalid_sum",      # the values do not sum to 1 within SUM_TOLERANCE
+    "parser_error",     # the parser itself failed (a bug); recorded by the runner, the move unaffected
 )
 
 _THINKING = re.compile(r"<thinking>.*?</thinking>", re.S | re.I)
@@ -127,14 +128,16 @@ def parse_prediction(*, reply: str, labels: tuple[str, ...]) -> ParsedPrediction
         values = json.loads(raw, object_pairs_hook=_no_duplicates, parse_constant=_reject_constant)
     except _DuplicateKey:
         return ParsedPrediction(status="duplicate_keys", raw=raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # bad JSON, NaN/Infinity, over-long integers, absurd nesting
         return ParsedPrediction(status="invalid_json", raw=raw)
     if not isinstance(values, dict):
         return ParsedPrediction(status="invalid_json", raw=raw)
     if set(values) != set(labels) or len(values) != len(labels):
         return ParsedPrediction(status="invalid_labels", raw=raw)
     for value in values.values():
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        # Range first: comparing is exact for any int (no float conversion, which overflows on huge
+        # ints) and false for NaN; an in-range value then converts to a finite float.
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
             return ParsedPrediction(status="invalid_values", raw=raw)
     raw_probs = {label: float(values[label]) for label in labels}
     total = sum(raw_probs.values())

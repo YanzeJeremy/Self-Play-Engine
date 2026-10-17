@@ -96,3 +96,14 @@ def test_scores_on_known_distributions():
     assert log_loss(probs=certain, observed="paper") == -math.log(LOG_LOSS_FLOOR)
     assert argmax_label(probs={"rock": 0.4, "paper": 0.4, "scissors": 0.2}, labels=LABELS) == "rock"  # ties: label order
     assert argmax_label(probs={"rock": 0.2, "paper": 0.4, "scissors": 0.4}, labels=LABELS) == "paper"
+
+
+@pytest.mark.parametrize(("prediction", "expected"), [
+    ('{"rock": ' + "9" * 400 + ', "paper": 0, "scissors": 0}', "invalid_values"),   # used to raise OverflowError
+    ('{"rock": -' + "9" * 400 + ', "paper": 1, "scissors": 1}', "invalid_values"),
+    ('{"rock": ' + "9" * 5000 + ', "paper": 0, "scissors": 0}', "invalid_json"),     # beyond Python's int-parsing limit
+    ('{"rock": 1e400, "paper": 0, "scissors": 0}', "invalid_values"),                 # parses to inf
+    ("[" * 100_000 + "]" * 100_000, "invalid_json"),                                  # nesting deeper than the parser allows
+])
+def test_hostile_numbers_and_nesting_are_statuses_not_crashes(prediction, expected):
+    assert status(move_reply(prediction=prediction)) == expected

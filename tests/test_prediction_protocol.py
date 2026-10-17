@@ -309,3 +309,24 @@ def test_the_template_hash_follows_the_prompt_texts(monkeypatch):
     before = fingerprint()["prompt_template_hash"]
     monkeypatch.setattr(prompting, "PREDICTION_SYSTEM_PROMPT", prompting.PREDICTION_SYSTEM_PROMPT + " ")
     assert fingerprint()["prompt_template_hash"] != before
+
+
+def test_a_malformed_forecast_never_stops_a_valid_move(monkeypatch):
+    replies = predicting_replies('{"rock": ' + "9" * 400 + ', "paper": 0, "scissors": 0}')
+    runner, _, result = play(replies=replies, prediction_mode=MODE)
+    _, _, legacy = play(replies=REPLIES)
+    assert result == legacy  # every move executed as without forecasts
+    assert {d["prediction_status"] for d in runner.prediction_decisions()} == {"invalid_values"}
+
+    import self_play.runner as runner_module
+
+    def broken_parser(**kwargs):
+        raise RuntimeError("parser bug")
+
+    monkeypatch.setattr(runner_module, "parse_prediction", broken_parser)
+    runner, _, result = play(replies=predicting_replies(), prediction_mode=MODE)
+    assert result == legacy
+    decisions = runner.prediction_decisions()
+    assert {d["prediction_status"] for d in decisions} == {"parser_error"}
+    call = next(e for e in runner.record if e["kind"] == "call" and e["call"] == "answer")
+    assert "parser bug" in call["prediction"]["error"]
