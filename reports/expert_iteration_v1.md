@@ -70,6 +70,7 @@ bash scripts/run_expert_iteration.sh                 # the full experiment
 - **Where outputs go:** everything lands in `$storage_dir/expert_iteration/<name>/` (default name `ei-v1`; the smoke run is `ei-v1-smoke`), in `configs/`, `runs/`, `data/`, `sft/`, `adapter/`, `logs/` and `stages/`. The result is `summary.md`.
 - **Resuming:** run the same command again. Finished stages are skipped, and unfinished evaluation runs resume.
 - **Rerunning part:** `--redo_from <stage>` reruns that stage and everything after it.
+- **Stopping early:** `--stop_after <stage>` stops successfully once that stage is done. For example, `--stop_after select` generates and selects data, then frees the GPUs. Rerun without the flag to continue.
 - **Changing settings** for an existing `--name` is refused; use a new name.
 - **Every setting is a flag**, e.g. `--gen_games`, `--target_min`, `--lr`, `--epochs`, `--lora_rank` and `--eval_games`. See the script header.
 

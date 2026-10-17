@@ -12,6 +12,7 @@
 #
 #   bash scripts/run_expert_iteration.sh --smoke true     # first: a tiny run through every stage (~30-60 min)
 #   bash scripts/run_expert_iteration.sh                  # the full experiment (about a day on 2 H200)
+#   bash scripts/run_expert_iteration.sh --stop_after select   # only generate and select the data (GPUs then free)
 #
 # Run it inside the GPU allocation (tmux recommended), from the repo root, with the GPUs free: it starts and stops
 # its own vLLM servers (stop any vllm serve you started). Everything lands in $storage_dir/expert_iteration/<name>/
@@ -56,6 +57,7 @@ ARGS["port"]="8000"
 ARGS["max_model_len"]="16384"
 ARGS["smoke"]="false"
 ARGS["redo_from"]="none"         # generate | select | sft | export | evaluate | summarize
+ARGS["stop_after"]="none"        # stop (successfully) once this stage is done, e.g. select
 
 REQUIRED_ARGS=()
 # --- Argument parsing (copy verbatim) ---
@@ -125,7 +127,7 @@ source scripts/eval_runs_lib.sh || { echo "Could not source scripts/eval_runs_li
 
 # --- one experiment, one set of settings --------------------------------------------------------------
 params="$(for key in $(printf '%s\n' "${!ARGS[@]}" | sort); do
-    case "$key" in gpus|port|redo_from) ;; *) echo "$key=${ARGS[$key]}" ;; esac
+    case "$key" in gpus|port|redo_from|stop_after) ;; *) echo "$key=${ARGS[$key]}" ;; esac
 done)"
 if [[ -f "$exp_dir/params.txt" ]]; then
     if [[ "$(cat "$exp_dir/params.txt")" != "$params" ]]; then
@@ -144,8 +146,17 @@ if [[ "${ARGS["redo_from"]}" != "none" ]]; then
     done
     $found || fail "--redo_from must be one of: ${STAGES[*]}"
 fi
+if [[ "${ARGS["stop_after"]}" != "none" && ! " ${STAGES[*]} " =~ " ${ARGS["stop_after"]} " ]]; then
+    fail "--stop_after must be one of: ${STAGES[*]}"
+fi
 stage_done() { [[ -f "$exp_dir/stages/$1.done" ]]; }
 mark_done() { date > "$exp_dir/stages/$1.done"; echo "== stage $1 done"; }
+stop_if_requested() {
+    if [[ "${ARGS["stop_after"]}" == "$1" ]]; then
+        echo "== stopping after stage $1 (--stop_after); rerun without it (same settings) to continue"
+        exit 0
+    fi
+}
 
 # --- GPUs and vLLM ---------------------------------------------------------------------------------------
 server_pid=""
@@ -208,6 +219,7 @@ if ! stage_done generate; then
     stop_server
     mark_done generate
 fi
+stop_if_requested generate
 
 # --- 2 select --------------------------------------------------------------------------------------------
 if ! stage_done select; then
@@ -220,6 +232,7 @@ if ! stage_done select; then
     [[ ${PIPESTATUS[0]} -eq 0 ]] || fail "data selection failed (log: $exp_dir/logs/select.log)"
     mark_done select
 fi
+stop_if_requested select
 
 # --- 3 sft -----------------------------------------------------------------------------------------------
 if ! stage_done sft; then
@@ -235,6 +248,7 @@ if ! stage_done sft; then
     [[ ${PIPESTATUS[0]} -eq 0 ]] || fail "SFT failed (log: $exp_dir/logs/sft.log)"
     mark_done sft
 fi
+stop_if_requested sft
 
 # --- 4 export --------------------------------------------------------------------------------------------
 if ! stage_done export; then
@@ -242,6 +256,7 @@ if ! stage_done export; then
         --base_model "$model" --rank "${ARGS["lora_rank"]}" --alpha "${ARGS["lora_alpha"]}" || fail "adapter export"
     mark_done export
 fi
+stop_if_requested export
 
 # The adapter is named, served and evaluated under a hash of its weights, so evaluation runs of an earlier
 # adapter (e.g. before --redo_from sft) are never taken for this one's.
@@ -265,6 +280,7 @@ if ! stage_done evaluate; then
     stop_server
     mark_done evaluate
 fi
+stop_if_requested evaluate
 
 # --- 6 summarize -----------------------------------------------------------------------------------------
 if ! stage_done summarize; then
