@@ -1,9 +1,12 @@
 """What an eval run *is*, and whether it is complete, for the B0/B1 workflow.
 
-A run's identity is the condition that defines its results: model, client type, sampling,
-which games (limit, skip, shuffle), the env settings that change play (game, game_config,
-prediction mode, retries, reward settings, seats' pinned models/sampling) and the prompt-
-template hash. Endpoint URLs, concurrency and checkpoint folders are not part of it.
+A run's identity is the condition that defines its results: for every seat the game uses,
+the seat as verifiers resolves it (the run's model, client and sampling under the seat's own
+pins), described by `agent_identity` exactly as in the checkpoint fingerprint (model, client
+type, renderer, renderer model name, sampling); which games (limit, skip, shuffle); the env
+settings that change play (game, game_config, prediction mode, retries, reward settings);
+and the prompt-template hash. Endpoint URLs, concurrency and checkpoint folders are not part
+of it.
 
     python scripts/run_identity.py check    --run_dir <dir> --config <requested eval toml>
     python scripts/run_identity.py complete --run_dir <dir>
@@ -34,32 +37,30 @@ PROTOCOL_FIELD = ("env", "prediction_mode")
 """The one field a B0/B1 pair is meant to differ in."""
 
 
-def _no_nulls(value):
-    if isinstance(value, dict):
-        return {k: _no_nulls(v) for k, v in sorted(value.items()) if v is not None}
-    return value
-
-
 def identity_from_config(*, config: dict, template_hash: str | None) -> dict:
     """The identity of an eval config: a parsed TOML as requested, or a saved resolved eval.json.
-    The env is normalized through SelfPlayEnvConfig, so defaults compare equal to explicit values."""
-    from self_play_verifiers.env import SelfPlayEnvConfig
+    Env and client are validated through their config classes, so defaults compare equal to
+    explicit values, and seats are resolved as verifiers resolves them."""
+    import pydantic
+    import verifiers.v1 as vf
+    from verifiers.v1.configs.agent import resolve_agent
+
+    from self_play_verifiers.env import SelfPlayEnvConfig, agent_identity
 
     env_config = {k: v for k, v in config.get("env", {}).items() if k not in ("checkpoint_dir", "allow_legacy_checkpoints")}
     env = SelfPlayEnvConfig.model_validate(env_config)
+    client = pydantic.TypeAdapter(vf.ClientConfig).validate_python({"type": "eval", **config.get("client", {})})
+    sampling = vf.SamplingConfig(**{k: v for k, v in config.get("sampling", {}).items() if v is not None})
+    players = GAMES[env.game](game_config={**env.game_config, "seed": 0}).player_ids
+    agents = {
+        seat: agent_identity(config=resolve_agent(getattr(env, seat), model=config.get("model"), client=client, sampling=sampling))
+        for seat in SEATS[: len(players)]
+    }
     select = config.get("select", {})
-    seats = {}
-    for name in SEATS:
-        seat = getattr(env, name)
-        pinned = {"model": seat.model, "sampling": seat.sampling.model_dump(mode="json") if seat.sampling else None}
-        seats[name] = _no_nulls(pinned)
     return {
-        "model": config.get("model"),
-        "client_type": config.get("client", {}).get("type", "eval"),
-        "sampling": _no_nulls(config.get("sampling", {})),
+        "agents": agents,
         "select": {"limit": select.get("limit"), "skip": select.get("skip", 0), "shuffle": select.get("shuffle", False)},
-        "env": {**{field: json.loads(json.dumps(getattr(env, field))) for field in ENV_FIELDS},
-                "taskset": env.taskset.id, "seats": seats},
+        "env": {**{field: json.loads(json.dumps(getattr(env, field))) for field in ENV_FIELDS}, "taskset": env.taskset.id},
         "prompt_template_hash": template_hash,
     }
 
@@ -110,14 +111,16 @@ def find_games(*, row):
     return None
 
 
-def completeness(*, run_dir: Path) -> dict:
-    """Whether the run holds exactly its configured games, all finished with the configured rounds."""
+def completeness(*, run_dir: Path, traces: Path | None = None) -> dict:
+    """Whether the run holds exactly its configured games, all finished with the configured rounds.
+    `traces` checks that exact file against the run's configuration (default: the run's own
+    traces.jsonl)."""
     identity = run_identity(run_dir=run_dir)
     limit, skip = identity["select"]["limit"], identity["select"]["skip"]
     rounds = identity["env"]["game_config"].get("rounds")
     expected = set(range(skip, skip + limit)) if limit is not None else None
     problems, seen = [], []
-    traces = run_dir / "traces.jsonl"
+    traces = traces if traces is not None else run_dir / "traces.jsonl"
     rows = [json.loads(line) for line in traces.open()] if traces.exists() else []
     if not traces.exists():
         problems.append("no traces.jsonl")

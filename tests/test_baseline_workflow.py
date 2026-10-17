@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from fake_runs import play_row, write_run  # noqa: E402
 from migrate_endpoint import migrate  # noqa: E402
-from run_identity import completeness, differences, requested_identity, run_identity  # noqa: E402
+from run_identity import completeness, differences, identity_from_config, requested_identity, run_identity  # noqa: E402
 
 pytestmark = pytest.mark.workflow
 
@@ -48,9 +48,10 @@ def test_a_saved_run_matches_only_its_requested_condition(tmp_path):
     assert differences(a=run_identity(run_dir=run_dir), b=requested_identity(config_path=SMOKE_B0)) == []
     assert run("python", "scripts/run_identity.py", "check", "--run_dir", str(run_dir), "--config", str(SMOKE_B0)).returncode == 0
     saved = run_identity(run_dir=run_dir)
-    for old, new, field in (('model = "google/gemma-4-31b-it"', 'model = "other/model"', "model"),
-                            ("temperature = 0", "temperature = 1.0", "sampling.temperature"),
-                            ("top_k = 64", "top_k = 32", "sampling.top_k"), ("max_tokens = 2048", "max_tokens = 4096", "sampling.max_tokens"),
+    for old, new, field in (('model = "google/gemma-4-31b-it"', 'model = "other/model"', "agents.seat0.model"),
+                            ("temperature = 0", "temperature = 1.0", "agents.seat0.sampling.temperature"),
+                            ("top_k = 64", "top_k = 32", "agents.seat0.sampling.top_k"),
+                            ("max_tokens = 2048", "max_tokens = 4096", "agents.seat0.sampling.max_tokens"),
                             ("rounds = 6", "rounds = 7", "env.game_config.rounds"), ("limit = 3", "limit = 4", "select.limit"),
                             ('prediction_mode = "off"', 'prediction_mode = "opponent_action_v1"', "env.prediction_mode")):
         changed = edited(tmp_path=tmp_path, source=SMOKE_B0, old=old, new=new)
@@ -115,6 +116,98 @@ def test_the_paired_comparison_needs_two_complete_matching_runs(tmp_path):
     result = analyze_pair(a=b0, b=partial, out=tmp_path / "exploratory.json", exploratory=True)
     assert result.returncode == 0 and "EXPLORATORY" in result.stdout
     assert json.loads((tmp_path / "exploratory.json").read_text())["paired"]["exploratory"] is True
+
+
+def test_pairing_checks_the_exact_files_analyzed(tmp_path):
+    b0 = write_run(runs_dir=tmp_path, name="b0", config_path=SMOKE_B0)
+    b1 = write_run(runs_dir=tmp_path, name="b1", config_path=SMOKE_B1)
+    for run_dir in (b0, b1):  # a one-game subset next to the complete traces.jsonl
+        (run_dir / "subset.jsonl").write_text((run_dir / "traces.jsonl").read_text().splitlines(keepends=True)[0])
+    args = ["python", "scripts/analyze_copycat_games.py", "--pair", str(b0 / "subset.jsonl"), str(b1 / "subset.jsonl")]
+    result = run(*args, "--json_out", str(tmp_path / "subset.json"))
+    assert result.returncode == 1 and "not a run's own traces.jsonl" in result.stdout and "incomplete" in result.stdout
+    assert not (tmp_path / "subset.json").exists()
+    complete_copy = tmp_path / "copy"
+    complete_copy.mkdir()
+    for run_dir in (b0, b1):  # even a complete copy elsewhere is not a run's own file
+        shutil.copy(run_dir / "traces.jsonl", run_dir / "all.jsonl")
+    result = run("python", "scripts/analyze_copycat_games.py", "--pair", str(b0 / "all.jsonl"), str(b1 / "all.jsonl"))
+    assert result.returncode == 1 and "not a run's own traces.jsonl" in result.stdout and "incomplete" not in result.stdout
+
+
+def test_pairing_needs_recorded_provenance(tmp_path):
+    b0 = write_run(runs_dir=tmp_path, name="b0", config_path=SMOKE_B0)
+    b1 = write_run(runs_dir=tmp_path, name="b1", config_path=SMOKE_B1)
+    for run_dir in (b0, b1):
+        shutil.rmtree(run_dir / "manifests")
+    result = analyze_pair(a=b0, b=b1, out=tmp_path / "none.json")
+    assert result.returncode == 1 and result.stdout.count("no recorded prompt-template hash") == 2
+    result = analyze_pair(a=b0, b=b1, out=tmp_path / "exploratory.json", exploratory=True)
+    assert result.returncode == 0 and json.loads((tmp_path / "exploratory.json").read_text())["paired"]["exploratory"] is True
+
+
+def base_config(**changes):
+    config = {"model": "m", "client": {"type": "eval"}, "sampling": {"temperature": 1.0, "max_tokens": 64},
+              "select": {"limit": 2}, "env": {"game": "copycat_rps", "game_config": {"rounds": 2}, "taskset": {"id": "self-play-verifiers"}}}
+    for path, value in changes.items():
+        node = config
+        *parents, last = path.split(".")
+        for key in parents:
+            node = node.setdefault(key, {})
+        node[last] = value
+    return identity_from_config(config=config, template_hash="h")
+
+
+def test_identity_covers_rendering_and_seat_overrides():
+    train = {"type": "train", "renderer_model_name": "Qwen/Qwen3-4B"}
+    assert base_config(client=train) != base_config(client={**train, "renderer_model_name": "Qwen/Qwen3-8B"})
+    assert base_config(client=train) != base_config()  # train vs eval client
+    assert base_config(**{"env.seat0": {"client": train}}) != base_config()  # a seat's own client
+    assert base_config(**{"env.seat0": {"sampling": {"temperature": 0.0}}}) != base_config()  # a seat's own sampling
+    assert base_config(**{"env.seat0": {"model": "pinned"}}) != base_config()
+    assert base_config(**{"env.seat3": {"model": "pinned"}}) == base_config()  # copycat has one player: seat3 is unused
+    assert base_config(client={"type": "eval", "base_url": "http://elsewhere/v1"}) == base_config()  # endpoints never count
+
+
+def test_the_identity_of_a_config_is_the_fingerprint_its_run_records():
+    import asyncio
+    from types import SimpleNamespace
+    from contextlib import asynccontextmanager
+
+    import verifiers.v1 as vf
+    from verifiers.v1.configs.agent import resolve_agent
+
+    from self_play_verifiers.env import SelfPlayEnv, SelfPlayEnvConfig
+    from self_play_verifiers.taskset import SelfPlayData, SelfPlayTask
+
+    config = {"model": "m", "client": {"type": "train", "renderer_model_name": "Qwen/Qwen3-4B"},
+              "sampling": {"temperature": 0.7, "max_tokens": 64}, "select": {"limit": 1},
+              "env": {"game": "copycat_rps", "game_config": {"rounds": 1}, "taskset": {"id": "self-play-verifiers"},
+                      "seat0": {"sampling": {"top_p": 0.9}}}}
+    env_config = SelfPlayEnvConfig.model_validate(config["env"])
+    import pydantic
+    resolved = resolve_agent(env_config.seat0, model="m", client=pydantic.TypeAdapter(vf.ClientConfig).validate_python(config["client"]),
+                             sampling=vf.SamplingConfig(**config["sampling"]))
+    replies = ["<answer>notes</answer>", "<answer>SILENCE</answer>", "<answer>rock</answer>"]
+    trace = SimpleNamespace(rewards={}, metrics={}, info={}, calls=[], record_reward=lambda *a, **k: None,
+                            record_metric=lambda *a, **k: None)
+    interaction = SimpleNamespace(trace=trace, turn=None)
+
+    async def turn(messages):
+        return SimpleNamespace(terminated=False, last_reply=replies.pop(0))
+    interaction.turn = turn
+
+    @asynccontextmanager
+    async def open_interaction(task):
+        yield interaction
+    seat = SimpleNamespace(config=resolved, trainable=True, interaction=open_interaction)
+    agents = SimpleNamespace(**{f"seat{i}": seat for i in range(6)})
+    env = SelfPlayEnv(env_config)
+    asyncio.run(env.start())
+    asyncio.run(env.run(SelfPlayTask(SelfPlayData(name="g", prompt=None, info={"seed": 0})), agents))
+    recorded = trace.info["game"]["fingerprint"]["agents"]
+    assert recorded["seat0"]["renderer_model_name"] == "Qwen/Qwen3-4B"
+    assert identity_from_config(config=config, template_hash="h")["agents"] == recorded
 
 
 # --- the stage script ----------------------------------------------------------------------------

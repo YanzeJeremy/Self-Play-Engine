@@ -14,8 +14,9 @@ action consistency (expected-payoff gap between the chosen move and the best mov
 forecast). Runs without predictions report those as unavailable.
 
 --pair compares two runs game by game on matching seeds (paired differences, 95% bootstrap
-intervals over games). It refuses (exit 1) unless both runs are complete (every configured
-seed finished, with the configured rounds) and are the same condition except
+intervals over games). It refuses (exit 1) unless each input is a run's own traces.jsonl,
+complete as analyzed (every configured seed finished once, with the configured rounds), with
+a recorded prompt-template hash, and the two runs are the same condition except
 `env.prediction_mode` (scripts/run_identity.py); --exploratory reports anyway, labeled so.
 --json_out writes every summary and per-game row as JSON.
 
@@ -374,20 +375,27 @@ def main(paths, pair, show, json_out, exploratory):
 
 
 def pair_problems(*, a, b):
-    """Why two runs cannot be compared as a B0/B1 pair: incomplete, or not the same condition
-    apart from the prediction mode."""
+    """Why two traces files cannot be compared as a B0/B1 pair: not a run's own traces.jsonl,
+    incomplete (checked on the exact file analyzed), without recorded provenance (no
+    prompt-template hash), or not the same condition apart from the prediction mode."""
     problems = []
-    dirs = {name: Path(path).parent for name, path in (("A", a), ("B", b))}
     identities = {}
-    for name, run_dir in dirs.items():
+    for name, path in (("A", Path(a)), ("B", Path(b))):
+        run_dir = path.parent
+        if path.name != "traces.jsonl":
+            problems.append(f"{name} ({path}) is not a run's own traces.jsonl, so its provenance cannot be verified")
         try:
-            identities[name] = run_identity(run_dir=run_dir)
-            status = completeness(run_dir=run_dir)
+            identity = run_identity(run_dir=run_dir)
+            status = completeness(run_dir=run_dir, traces=path)
         except (FileNotFoundError, KeyError, ValueError) as error:
             problems.append(f"{name} ({run_dir.name}): no verifiable run identity ({error})")
             continue
+        if not identity["prompt_template_hash"]:
+            problems.append(f"{name} ({run_dir.name}) has no recorded prompt-template hash (no manifest)")
+        else:
+            identities[name] = identity
         if not status["complete"]:
-            problems.append(f"{name} ({run_dir.name}) incomplete: " + "; ".join(status["problems"]))
+            problems.append(f"{name} ({path}) incomplete: " + "; ".join(status["problems"]))
     if len(identities) == 2:
         diffs = differences(a=identities["A"], b=identities["B"], ignore=(PROTOCOL_FIELD,))
         if diffs:

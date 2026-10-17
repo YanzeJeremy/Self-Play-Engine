@@ -192,11 +192,18 @@ class SelfPlayEnv(vf.Env[SelfPlayEnvConfig]):
 
 
 def seat_identity(*, agent) -> dict[str, Any]:
-    """The resolved model, client type, renderer and sampling of a seat, as JSON values, for
-    the run fingerprint (endpoint URLs and keys left out)."""
+    """`agent_identity` of a live seat, for the run fingerprint."""
     config = getattr(agent, "config", None)
     if config is None:  # test doubles carry no config
         return {}
+    return agent_identity(config=config)
+
+
+def agent_identity(*, config: vf.AgentConfig) -> dict[str, Any]:
+    """What a resolved seat config (`resolve_agent`) contributes to a run's condition, as JSON
+    values: model, client type, renderer and renderer model name (tokenization and chat
+    rendering), and sampling. Endpoint URLs, keys, headers, timeouts and concurrency are left
+    out. Shared by the checkpoint fingerprint and scripts/run_identity.py."""
     client = config.client
     dump = lambda value: value.model_dump(mode="json", exclude_none=True) if value is not None else None
     return {

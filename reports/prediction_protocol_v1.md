@@ -17,7 +17,7 @@ Training (M3+) is not part of this branch. The plan gates it on validated B0/B1 
 | `self_play_verifiers/env.py` | Config `prediction_mode` (default `off`) and `allow_legacy_checkpoints` (default false). Fingerprints from each seat's resolved model, client type, renderer and sampling. `trace.info["predictions"]` plus `prediction_*` metrics. Rewards are untouched. |
 | `scripts/eval.sh` | Writes `manifests/<time>.json` via `scripts/write_run_manifest.py` before every vf-eval invocation. `--resume true --base_url <new>` moves a run to a new server first (`scripts/migrate_endpoint.py`). |
 | `self_play/chat_model.py`, `runner.py` | Each call's provider details (token usage, finish reason, timing) are stored in its record entry as `call_info`, so they survive checkpoint resume. |
-| `scripts/run_identity.py` (new) | A run's identity (the condition) and its completeness. Used by the stage script and the paired analysis. |
+| `scripts/run_identity.py` (new) | A run's identity (the condition) and its completeness. Used by the stage script and the paired analysis. Seats are resolved as verifiers resolves them and described by `agent_identity` (`self_play_verifiers/env.py`), the same function the checkpoint fingerprint uses. |
 | `scripts/migrate_endpoint.py` (new) | Rewrites only `client.base_url` of a run's saved config, after confirming the new server serves the run's model. Records the change in `configs/endpoint_history.json`. |
 | `scripts/write_run_manifest.py` (new) | Commits and dirty flags (root, prime-rl, verifiers), the eval config, protocol constants and template hash, the server's `/v1/models` and `/version`, and from the HF cache the model revision, generation-config defaults and chat-template hash. |
 | `scripts/analyze_copycat_games.py` | The legacy summaries are kept. Added: forecast coverage with every status, accuracy, Brier, log loss (with the number of zero-probability observations), coverage-adjusted Brier, action consistency, adaptation windows, output costs, per-game rows, `--pair` (paired by seed, bootstrap 95% CI over games) and `--json_out`. |
@@ -67,7 +67,7 @@ Training (M3+) is not part of this branch. The plan gates it on validated B0/B1 
 
 ## 3. Tests
 
-`pytest tests/`: **129 passed, 1 failed** (`-m "not workflow"` skips the slow script tests: 114 passed). The failure is pre-existing and not caused by this branch: `tests/test_env.py::test_a_game_runs_through_seat0_and_fills_its_trace` expects no `game_outcome` metric, which commit `13cd059` added.
+`pytest tests/`: **133 passed, 1 failed** (`-m "not workflow"` skips the slow script tests: 114 passed). The failure is pre-existing and not caused by this branch: `tests/test_env.py::test_a_game_runs_through_seat0_and_fills_its_trace` expects no `game_outcome` metric, which commit `13cd059` added.
 
 | Test file | Covers |
 |---|---|
@@ -147,6 +147,16 @@ Run with `scripts/run_prediction_baseline.sh --stage smoke` against the live ser
 - In the first smoke run (section 5), B1 was resumed before `call_info` existed. The analyzer now reports its costs as incomplete (0 of 3 games) rather than under-counting them.
 
 **Endpoint move, end to end.** A copy of a smoke run was given a dead saved endpoint and one game removed. An unreachable target was refused. Moving to the live server was recorded, and the resume replayed the removed game live: 15 calls with `call_info`, and the run is complete.
+
+### Second review (after `d823489`)
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | Strict pairing could check a run's `traces.jsonl` while analyzing other files, e.g. one-game subsets next to it. | `--pair` now checks completeness on the exact files analyzed, and refuses any input that isn't a run's own `traces.jsonl`. |
+| 2 | Two runs without manifests (prompt hash unknown on both sides) passed as a verified pair. | Strict pairing requires a recorded prompt-template hash on both runs. Missing provenance needs `--exploratory`. |
+| 3 | The run identity omitted renderer, renderer model name and seats' own client settings. | Seats are now resolved with verifiers' `resolve_agent` and described by `agent_identity`, shared with the checkpoint fingerprint. Only the seats the game uses count. On the real v2 B1 smoke run, the identity's seat block equals the fingerprint stored in its checkpoints. |
+
+These are covered in `tests/test_baseline_workflow.py`: subset and copied files refused; missing manifests refused; renderer, client type and seat client/sampling/model pins change the identity, while unused seats and endpoints don't; and the identity of a config equals the fingerprint its env run records.
 
 ## 8. Not done here
 
