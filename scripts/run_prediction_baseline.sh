@@ -77,23 +77,8 @@ runs_dir="${EVAL_RUNS_DIR:-$storage_dir/eval_runs}"     # EVAL_RUNS_DIR, EVAL_SC
 eval_script="${EVAL_SCRIPT:-scripts/eval.sh}"
 configs="${PREDV1_CONFIG_DIR:-eval_configs}"
 
-fail() { echo "Error: $*"; exit 1; }
-
-is_complete() { python scripts/run_identity.py complete --run_dir "$runs_dir/$1"; }
-
-run_condition() {  # run_condition <config> <run name>: leaves the run complete, or stops the script
-    local config="$1" name="$2" run_dir="$runs_dir/$2"
-    if [[ -f "$run_dir/configs/resolved/eval.json" ]]; then
-        python scripts/run_identity.py check --run_dir "$run_dir" --config "$config" || fail "$name exists but is another condition"
-        if is_complete "$name" > /dev/null; then echo "== $name: complete, skipping"; return 0; fi
-        echo "== $name: resuming"
-        bash "$eval_script" --name "$name" --resume true --base_url "${ARGS["base_url"]}" || fail "evaluation of $name failed (exit $?)"
-    else
-        echo "== $name: starting"
-        bash "$eval_script" --config "$config" --name "$name" --base_url "${ARGS["base_url"]}" || fail "evaluation of $name failed (exit $?)"
-    fi
-    is_complete "$name" || fail "$name is incomplete after evaluation; rerun this script to resume it"
-}
+base_url="${ARGS["base_url"]}"
+source scripts/eval_runs_lib.sh || { echo "Could not source scripts/eval_runs_lib.sh"; exit 1; }
 
 pairs=()
 case "$stage" in

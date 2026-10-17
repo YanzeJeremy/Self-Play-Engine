@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from run_identity import requested_identity  # noqa: E402
 from self_play.chat_model import ChatModel  # noqa: E402
-from self_play.games.copycat_rps import CopycatRPSGame  # noqa: E402
+from self_play.games import GAMES  # noqa: E402
 from self_play.runner import Runner  # noqa: E402
 from self_play_verifiers.env import SelfPlayEnvConfig  # noqa: E402
 
@@ -50,11 +50,11 @@ class RotationModel(ChatModel):
         return f"<thinking>x</thinking>{forecast}<answer>{move}</answer>[STOP]"
 
 
-def play_row(*, seed: int, rounds: int, prediction_mode: str) -> dict:
-    runner = Runner(game=CopycatRPSGame(game_config={"seed": seed, "rounds": rounds}),
+def play_row(*, seed: int, rounds: int, prediction_mode: str, game: str = "copycat_rps", game_config: dict | None = None) -> dict:
+    runner = Runner(game=GAMES[game](game_config={**(game_config or {}), "seed": seed, "rounds": rounds}),
                     models={"player": RotationModel()}, prediction_mode=prediction_mode)
     result = asyncio.run(runner.run())
-    game = {"game": "copycat_rps", "game_config": runner.game.game_config, "seats": {"player": "seat0"}, "resumed": False,
+    game = {"game": game, "game_config": runner.game.game_config, "seats": {"player": "seat0"}, "resumed": False,
             "outcome": result["outcome"], "steps": runner.game.steps, "step_rewards": result["step_rewards"],
             "invalid": result["invalid"], "record": runner.record}
     info = {"game": game}
@@ -92,7 +92,9 @@ def write_run(*, runs_dir: Path, name: str, config_path: Path, games: int | None
             {"protocol": {"prompt_template_hash": requested_identity(config_path=config_path)["prompt_template_hash"]}}))
     config = json.loads(saved.read_text())
     limit, rounds, mode = config["select"]["limit"], config["env"]["game_config"]["rounds"], config["env"]["prediction_mode"]
-    rows = [play_row(seed=seed, rounds=rounds, prediction_mode=mode) for seed in range(limit if games is None else games)]
+    skip = config["select"].get("skip", 0)
+    rows = [play_row(seed=seed, rounds=rounds, prediction_mode=mode, game=config["env"]["game"], game_config=config["env"]["game_config"])
+            for seed in range(skip, skip + (limit if games is None else games))]
     (run_dir / "traces.jsonl").write_text("".join(json.dumps(row) + "\n" for row in [*rows, *extra_rows]))
     return run_dir
 

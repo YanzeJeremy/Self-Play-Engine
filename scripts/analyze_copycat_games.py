@@ -16,8 +16,9 @@ forecast). Runs without predictions report those as unavailable.
 --pair compares two runs game by game on matching seeds (paired differences, 95% bootstrap
 intervals over games). It refuses (exit 1) unless each input is a run's own traces.jsonl,
 complete as analyzed (every configured seed finished once, with the configured rounds), with
-a recorded prompt-template hash, and the two runs are the same condition except
-`env.prediction_mode` (scripts/run_identity.py); --exploratory reports anyway, labeled so.
+a recorded prompt-template hash, and the two runs are the same condition except the
+`--vary` fields (default `env.prediction_mode`; `agents.seat0.model` for a base model against
+its trained adapter) (scripts/run_identity.py); --exploratory reports anyway, labeled so.
 --json_out writes every summary and per-game row as JSON.
 
 Costs come from each call's `call_info` in the game record, which survives checkpoint resume.
@@ -328,7 +329,9 @@ def paired(*, rows_a, rows_b):
 @click.option("--show", default=0, show_default=True, help="Games to print in detail per run.")
 @click.option("--json_out", default=None, help="Write all summaries and per-game rows here as JSON.")
 @click.option("--exploratory", is_flag=True, help="Pair runs even if incomplete or not the same condition (labeled).")
-def main(paths, pair, show, json_out, exploratory):
+@click.option("--vary", "vary", multiple=True, default=(".".join(PROTOCOL_FIELD),), show_default=True,
+              help="Identity field(s) the pair is meant to differ in, dotted; e.g. agents.seat0.model for base vs trained.")
+def main(paths, pair, show, json_out, exploratory, vary):
     output = {"runs": {}, "paired": None}
     for path in list(paths) + [p for p in (pair or ()) if p not in paths]:
         episodes, unfinished = load_episodes(path=path)
@@ -350,7 +353,7 @@ def main(paths, pair, show, json_out, exploratory):
     refused = False
     if pair:
         a, b = pair
-        problems = pair_problems(a=a, b=b)
+        problems = pair_problems(a=a, b=b, vary=vary)
         if problems and not exploratory:
             refused = True
             print("\nError: refusing the paired comparison (use --exploratory to report it anyway, labeled):")
@@ -374,7 +377,7 @@ def main(paths, pair, show, json_out, exploratory):
         sys.exit(1)
 
 
-def pair_problems(*, a, b):
+def pair_problems(*, a, b, vary=(".".join(PROTOCOL_FIELD),)):
     """Why two traces files cannot be compared as a B0/B1 pair: not a run's own traces.jsonl,
     incomplete (checked on the exact file analyzed), without recorded provenance (no
     prompt-template hash), or not the same condition apart from the prediction mode."""
@@ -397,9 +400,9 @@ def pair_problems(*, a, b):
         if not status["complete"]:
             problems.append(f"{name} ({path}) incomplete: " + "; ".join(status["problems"]))
     if len(identities) == 2:
-        diffs = differences(a=identities["A"], b=identities["B"], ignore=(PROTOCOL_FIELD,))
+        diffs = differences(a=identities["A"], b=identities["B"], ignore=tuple(tuple(field.split(".")) for field in vary))
         if diffs:
-            problems.append("A and B differ beyond env.prediction_mode: " + "; ".join(diffs))
+            problems.append(f"A and B differ beyond {', '.join(vary)}: " + "; ".join(diffs))
     return problems
 
 
