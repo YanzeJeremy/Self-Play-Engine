@@ -32,6 +32,13 @@ filter about 13.6% (stats.json reports the rate for the settings used next to th
 rates), so relaxing admits much more luck. Every example records whether it passed the
 strictest threshold.
 
+Control (--mode random --match_dir M): the same games, without the success filter. From the
+train games (and, for validation, the validation games) of the same runs, round-2+ calls are
+drawn uniformly at random (seeded), whatever their outcome, matching M's dataset count for
+count per (rule, call kind), so opponent and thinking/move proportions are identical and the
+token budget comparable (stats.json reports both totals). It tells whether the success filter
+adds anything beyond exposure to the task's prompts and the model's own play.
+
 Writes D/dataset/{train,validation}.jsonl (only `prompt` and `completion` message lists, the
 columns prime-rl's SFT reads; D/dataset is the SFT data folder), D/meta/{train,validation}.jsonl (each example's run, rule, seed,
 round, call kind, window win fraction and tokens, line by line), and D/stats.json (yields per
@@ -153,6 +160,66 @@ def allocate(*, available: dict[str, int], target: int, share: float) -> tuple[i
     return 0, {rule: 0 for rule in available}
 
 
+def random_control(*, out_dir, pool, match_dir, count_tokens, token_method, max_tokens, seed, hard_min, dropped, games_per_rule,
+                   run_dirs, val_fraction):
+    """Uniform samples from the same games, matched count for count per (rule, call) to match_dir's dataset."""
+    import random
+
+    rng = random.Random(seed)
+    targets = {split: Counter((m["rule"], m["call"]) for m in map(json.loads, (match_dir / "meta" / f"{split}.jsonl").open()))
+               for split in ("train", "validation")}
+    chosen, shortfall = {"train": [], "validation": []}, {}
+    for split, wanted in targets.items():
+        for key, count in sorted(wanted.items()):
+            candidates = list(pool[split].get(key, []))
+            rng.shuffle(candidates)
+            taken, seen = [], set()
+            for ex in candidates:
+                if len(taken) == count:
+                    break
+                digest = hashlib.sha256(json.dumps([ex["prompt"], ex["completion"]]).encode()).hexdigest()
+                tokens = count_tokens(ex["prompt"] + ex["completion"])
+                if digest in seen or tokens > max_tokens:
+                    continue
+                seen.add(digest)
+                taken.append({**ex, "meta": {**ex["meta"], "tokens": tokens}})
+            if len(taken) < count:
+                shortfall[f"{split}:{key[0]}:{key[1]}"] = count - len(taken)
+            chosen[split] += taken
+    for sub in ("dataset", "meta"):
+        (out_dir / sub).mkdir(parents=True, exist_ok=True)
+    for split, rows in chosen.items():
+        with (out_dir / "dataset" / f"{split}.jsonl").open("w") as data, (out_dir / "meta" / f"{split}.jsonl").open("w") as meta:
+            for row in rows:
+                data.write(json.dumps({"prompt": row["prompt"], "completion": row["completion"]}) + "\n")
+                meta.write(json.dumps(row["meta"]) + "\n")
+    train = chosen["train"]
+    matched = json.loads((match_dir / "stats.json").read_text())
+    stats = {
+        "mode": "random", "matched_to": str(match_dir), "seed": seed,
+        "train_examples": len(train), "validation_examples": len(chosen["validation"]),
+        "train_unique_games": len({(r["meta"]["run"], r["meta"]["seed"]) for r in train}),
+        "train_tokens": sum(r["meta"]["tokens"] for r in train),
+        "matched_train_tokens": matched.get("train_tokens"),
+        "max_example_tokens": max((r["meta"]["tokens"] for r in train), default=0),
+        "token_method": token_method,
+        "train_by_rule_and_call": {f"{rule}:{call}": n for (rule, call), n in sorted(Counter((r["meta"]["rule"], r["meta"]["call"]) for r in train).items())},
+        "matched_by_rule_and_call": {f"{rule}:{call}": n for (rule, call), n in sorted(targets["train"].items())},
+        "shortfall": shortfall,
+        "train_won_share": sum(r["meta"]["won"] for r in train) / len(train) if train else None,
+        "train_strict_share": sum(r["meta"]["strict"] for r in train) / len(train) if train else None,
+        "games_by_rule": dict(games_per_rule), "dropped": dict(dropped),
+        "settings": {"val_fraction": val_fraction, "max_tokens_per_example": max_tokens, "runs": [str(r) for r in run_dirs]},
+    }
+    (out_dir / "stats.json").write_text(json.dumps(stats, indent=1))
+    print(json.dumps({k: stats[k] for k in ("mode", "train_examples", "train_unique_games", "train_tokens", "matched_train_tokens",
+                                            "train_won_share", "train_strict_share", "shortfall")}, indent=1))
+    if shortfall:
+        print(f"WARNING: could not match every count: {shortfall}")
+    if len(train) < hard_min:
+        raise SystemExit(f"Error: {len(train)} control examples is below --hard_min {hard_min}")
+
+
 @click.command()
 @click.option("--runs", "run_dirs", multiple=True, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--out_dir", required=True, type=click.Path(path_type=Path))
@@ -167,8 +234,14 @@ def allocate(*, available: dict[str, int], target: int, share: float) -> tuple[i
 @click.option("--val_fraction", default=0.05, show_default=True, help="Share of games held out for validation.")
 @click.option("--max_tokens_per_example", default=7936, show_default=True, help="Longer examples are dropped (SFT seq_len minus margin).")
 @click.option("--hard_min", default=500, show_default=True, help="Fail when fewer train examples than this remain.")
+@click.option("--mode", default="success", type=click.Choice(["success", "random"]), show_default=True)
+@click.option("--match_dir", default=None, type=click.Path(exists=True, path_type=Path), help="random mode: the success selection to match.")
+@click.option("--seed", "sample_seed", default=0, show_default=True, help="random mode: sampling seed.")
 def main(run_dirs, out_dir, model, target_min, target_max, window, min_window, thresholds, per_game_cap,
-         max_rule_share, val_fraction, max_tokens_per_example, hard_min):
+         max_rule_share, val_fraction, max_tokens_per_example, hard_min, mode, match_dir, sample_seed):
+    if mode == "random" and match_dir is None:
+        raise click.BadParameter("--mode random needs --match_dir (the success selection to match)")
+    random_pool = {"train": defaultdict(list), "validation": defaultdict(list)}
     thresholds = [float(t) for t in thresholds.split(",")]
     strict = thresholds[0]
     dropped = Counter()
@@ -187,6 +260,20 @@ def main(run_dirs, out_dir, model, target_min, target_max, window, min_window, t
             calls = decisive_calls(record=game["record"])
             for k in range(1, len(results)):
                 span = results[k:k + window]
+                if mode == "random":
+                    split = "validation" if in_validation(rule=rule, seed=seed, run=run_dir.name, fraction=val_fraction) else "train"
+                    win_fraction = span.count("W") / len(span)
+                    for kind in ("think", "answer"):
+                        call = calls[k].get(kind)
+                        reason = usable(call=call)
+                        if reason:
+                            dropped[f"{kind}:{reason}"] += 1
+                            continue
+                        random_pool[split][(rule, kind)].append(example(call=call, meta={
+                            "run": run_dir.name, "rule": rule, "seed": seed, "round": k + 1, "call": kind,
+                            "won": results[k] == "W", "window_win_fraction": win_fraction,
+                            "strict": results[k] == "W" and len(span) >= min_window and win_fraction >= strict}))
+                    continue
                 if len(span) < min_window:
                     continue
                 eligible_rounds[rule] += 1
@@ -209,6 +296,11 @@ def main(run_dirs, out_dir, model, target_min, target_max, window, min_window, t
 
     count_tokens, token_method = token_counter(model=model)
     token_cache = {}
+    if mode == "random":
+        random_control(out_dir=out_dir, pool=random_pool, match_dir=match_dir, count_tokens=count_tokens, token_method=token_method,
+                       max_tokens=max_tokens_per_example, seed=sample_seed, hard_min=hard_min, dropped=dropped,
+                       games_per_rule=games_per_rule, run_dirs=run_dirs, val_fraction=val_fraction)
+        return
 
     def pools(threshold):
         """Per rule: ordered eligible examples from train games and from validation games."""

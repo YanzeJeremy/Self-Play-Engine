@@ -19,6 +19,13 @@ k_proj weights into both the K and V slots, but applies LoRA per slot, and leave
 v_proj adapter empty: the served values would lack the update. So for those layers (read from
 the base model's config, by vLLM's own rule) the k_proj adapter is also written as the v_proj
 adapter. source.json lists them.
+
+Fidelity: after writing, the adapter is reloaded with vLLM's own LoRA loader (CPU) and, for every
+adapted module, the update vLLM would add (B·A·x, its scaling folded in) is compared with the
+trained update from the checkpoint ((alpha/rank)·B·A·x) on the same random inputs; for each
+shared key/value layer, the served V-slot update is compared with the trained k_proj update (the
+values' update in training). Any relative error above --tolerance (bfloat16 storage needs ~1e-2)
+fails the export. The result is written to fidelity.json.
 """
 
 import json
@@ -73,7 +80,7 @@ def share_kv(*, adapter: dict, layers: set[int]) -> list[str]:
     return written
 
 
-def read_adapter(*, ckpt: Path, rank: int) -> dict:
+def read_adapter(*, ckpt: Path, rank: int, dtype="bfloat16") -> dict:
     import torch
     from torch.distributed.checkpoint import FileSystemReader, load
 
@@ -91,7 +98,8 @@ def read_adapter(*, ckpt: Path, rank: int) -> dict:
     load(state, storage_reader=reader)
     adapter, modules = {}, {}
     for key, (module, which, _) in wanted.items():
-        adapter[f"{module}.{which}.weight"] = state[key].to(torch.bfloat16).contiguous()
+        tensor = state[key].float() if dtype is None else state[key].to(torch.bfloat16)
+        adapter[f"{module}.{which}.weight"] = tensor.contiguous()
         modules.setdefault(module, {})[which] = state[key].shape
     for module, parts in modules.items():
         if set(parts) != {"lora_A", "lora_B"}:
@@ -109,11 +117,13 @@ def read_adapter(*, ckpt: Path, rank: int) -> dict:
 @click.option("--rank", required=True, type=int)
 @click.option("--alpha", required=True, type=float)
 @click.option("--dropout", default=0.0, type=float)
-def main(ckpt, out_dir, base_model, rank, alpha, dropout):
+@click.option("--tolerance", default=0.03, type=float, help="Largest relative error allowed in the fidelity check.")
+def main(ckpt, out_dir, base_model, rank, alpha, dropout, tolerance):
     from safetensors.torch import save_file
 
     checkpoint = find_checkpoint(path=ckpt)
     adapter = read_adapter(ckpt=checkpoint, rank=rank)
+    trained = read_adapter(ckpt=checkpoint, rank=rank, dtype=None)
     shared = share_kv(adapter=adapter, layers=shared_kv_layers(base_model=base_model))
     out_dir.mkdir(parents=True, exist_ok=True)
     save_file(adapter, str(out_dir / "adapter_model.safetensors"))
@@ -125,8 +135,43 @@ def main(ckpt, out_dir, base_model, rank, alpha, dropout):
     }
     (out_dir / "adapter_config.json").write_text(json.dumps(config, indent=2))
     (out_dir / "source.json").write_text(json.dumps({"checkpoint": str(checkpoint), "shared_kv_v_proj_copied_from_k_proj": shared}, indent=2))
+    fidelity = verify_export(out_dir=out_dir, trained=trained, shared=shared, rank=rank, alpha=alpha, targets=targets)
+    (out_dir / "fidelity.json").write_text(json.dumps(fidelity, indent=2))
+    if fidelity["max_relative_error"] > tolerance:
+        raise SystemExit(f"Error: the exported adapter does not reproduce the trained update: worst relative error "
+                         f"{fidelity['max_relative_error']:.4f} at {fidelity['worst']} (tolerance {tolerance}); see fidelity.json")
     print(f"exported {len(adapter) // 2} adapted modules ({', '.join(targets)}) from {checkpoint} to {out_dir}; "
-          f"k_proj adapter also written as v_proj for {len(shared)} shared key/value layers")
+          f"k_proj adapter also written as v_proj for {len(shared)} shared key/value layers; vLLM-loaded update matches the "
+          f"checkpoint on {fidelity['modules_checked']} modules (worst relative error {fidelity['max_relative_error']:.4f})")
+
+
+def verify_export(*, out_dir: Path, trained: dict, shared: list[str], rank: int, alpha: float, targets: list[str]) -> dict:
+    """Reload the written adapter with vLLM's loader and compare each module's update with the checkpoint's."""
+    import torch
+    import vllm.lora.lora_model as vllm_lora_model
+    from vllm.lora.peft_helper import PEFTHelper
+
+    vllm_lora_model.PIN_MEMORY = False  # pinning needs a GPU; loading does not
+    helper = PEFTHelper.from_local_dir(str(out_dir), max_position_embeddings=None)
+    served = vllm_lora_model.LoRAModel.from_local_checkpoint(
+        str(out_dir), expected_lora_modules=set(targets), peft_helper=helper, device="cpu", dtype=torch.float32)
+    generator = torch.Generator().manual_seed(0)
+    errors = {}
+    checks = [(m, m) for m in {k.rsplit(".lora_", 1)[0] for k in trained}]
+    checks += [(v, v.replace(".self_attn.v_proj", ".self_attn.k_proj")) for v in shared]  # served V slot vs trained values
+    for served_module, trained_module in checks:
+        a, b = trained[f"{trained_module}.lora_A.weight"], trained[f"{trained_module}.lora_B.weight"]
+        x = torch.randn(a.shape[1], generator=generator)
+        expected = (alpha / rank) * (b @ (a @ x))
+        lora = served.get_lora(served_module)
+        if lora is None:
+            errors[served_module] = float("inf")
+            continue
+        lora.optimize()
+        got = lora.lora_b @ (lora.lora_a @ x)
+        errors[served_module] = float((got - expected).norm() / expected.norm().clamp(min=1e-12))
+    worst = max(errors, key=errors.get)
+    return {"modules_checked": len(errors), "max_relative_error": errors[worst], "worst": worst, "relative_errors": errors}
 
 
 if __name__ == "__main__":

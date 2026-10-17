@@ -64,6 +64,7 @@ def test_every_rule_plays_as_documented():
         "counter_last": lambda o, m, t: BEATEN_BY[m[-1]],
         "beaten_by_last": lambda o, m, t: {v: k for k, v in BEATEN_BY.items()}[m[-1]],
         "copy_two_back": lambda o, m, t: m[-2] if len(m) >= 2 else o,
+        "copy_three_back": lambda o, m, t: m[-3] if len(m) >= 3 else o,
         "repeat_self": lambda o, m, t: o,
         "cycle": lambda o, m, t: BEATEN_BY[t[-1]],
     }.items():
@@ -73,7 +74,7 @@ def test_every_rule_plays_as_documented():
             played = [h["player"] for h in history[:k]]
             theirs = [h["opponent"] for h in history[:k]]
             assert history[k]["opponent"] == expected(opening, played, theirs), (rule, k)
-    assert set(RULES) == {"copy_last", "counter_last", "beaten_by_last", "copy_two_back", "repeat_self", "cycle"}
+    assert set(RULES) == {"copy_last", "counter_last", "beaten_by_last", "copy_two_back", "copy_three_back", "repeat_self", "cycle"}
     assert GAMES["hidden_rule_rps"] is HiddenRuleRPSGame
     with pytest.raises(ValueError, match="rule must be one of"):
         HiddenRuleRPSGame(game_config={"seed": 0, "rounds": 2, "rule": "telepathy"})
@@ -296,38 +297,55 @@ def test_the_pipeline_runs_resumes_and_guards_its_settings(tmp_path):
     pipeline = lambda *args, **extra: run("bash", "scripts/run_expert_iteration.sh", "--smoke", "true", "--name", "t", *args,
                                           env={**env, **extra})
     exp = tmp_path / "t-smoke"
-    calls = lambda: (exp / "sft/outputs/stub_sft_calls.log").read_text().splitlines()
+    calls = lambda arm="sft": (exp / {"sft": "sft", "rand": "sft-random"}[arm] / "outputs/stub_sft_calls.log").read_text().splitlines()
 
     # SFT crashes before its first checkpoint, then after one: retries restart clean, then resume
     crashed = pipeline(STUB_SFT_CRASH="before_ckpt")
-    assert crashed.returncode == 1 and "SFT failed" in crashed.stdout
+    assert crashed.returncode == 1 and "SFT (sft) failed" in crashed.stdout
+    # a started stage keeps its settings: an interrupted SFT cannot be resumed under another lr
+    changed = pipeline("--lr", "3e-4")
+    assert changed.returncode == 1 and "started stages were run with other settings" in changed.stdout and "sft: lr=" in changed.stdout
     crashed = pipeline(STUB_SFT_CRASH="after_ckpt")
     assert crashed.returncode == 1 and calls() == ["(fresh)", "--clean"]
     first = pipeline()
     assert first.returncode == 0, first.stdout[-3000:] + first.stderr[-2000:]
-    assert calls() == ["(fresh)", "--clean", "--resume"]
-    for stage in ("generate", "select", "sft", "export", "evaluate", "summarize"):
+    assert calls() == ["(fresh)", "--clean", "--resume"] and calls("rand") == ["(fresh)"]
+    for stage in ("generate", "select", "control", "sft", "export", "evaluate", "summarize"):
         assert (exp / "stages" / f"{stage}.done").exists() and (exp / "stages" / f"{stage}.params").exists()
+    control = json.loads((exp / "data-random/stats.json").read_text())
+    assert control["mode"] == "random" and control["shortfall"] == {}
     summary = json.loads((exp / "summary.json").read_text())
+    assert summary["base_arm"] == "base" and summary["sft_arm"].startswith("sft-")
     assert [r["rule"] for r in summary["results"]][0] == "copy_last" and not any(r["problems"] for r in summary["results"])
-    assert summary["sft_arm"].startswith("sft-") and list(summary["by_horizon"]) == ["4 rounds", "6 rounds"]
-    assert all(len(r["per_round_wins"]["base"]) == 6 for r in summary["by_horizon"]["6 rounds"])
+    assert list(summary["by_horizon"]) == ["4 rounds", "6 rounds"]
+    assert [(d["condition"], d["rule"]) for d in summary["diagnostics"]] == [
+        ("shuffled", "copy_last"), ("intervene", "copy_last"), ("switch", "copy_last"), ("lag3", "copy_three_back"),
+        ("shuffled", "counter_last")]
+    assert not any(d["problems"] for d in summary["diagnostics"])
+    versus = json.loads((exp / "summary-sft-vs-rand.json").read_text())
+    assert versus["base_arm"].startswith("rand-") and (exp / "summary-rand.md").exists()
 
     again = pipeline()
     assert again.returncode == 0 and "== stage" not in again.stdout  # nothing redone
 
     # a finished stage keeps its settings, unless it is redone
-    changed = pipeline("--lr", "3e-4")
-    assert changed.returncode == 1 and "finished stages were run with other settings" in changed.stdout and "sft: lr=" in changed.stdout
+    assert pipeline("--lr", "5e-5").returncode == 1
     changed = pipeline("--eval_skip", "60000")  # (smoke mode fixes eval_games itself)
     assert changed.returncode == 1 and "evaluate: eval_skip=" in changed.stdout
-    retrained = pipeline("--lr", "3e-4", "--redo_from", "sft")
+    # redoing evaluation under a changed setting archives the affected runs and reuses unchanged ones
+    reevaluated = pipeline("--eval_skip", "60000", "--redo_from", "evaluate")
+    assert reevaluated.returncode == 0, reevaluated.stdout[-3000:]
+    archived = sorted(p.name.rsplit(".", 1)[0] for p in (exp / "runs/archive").iterdir())
+    # only runs that used --eval_skip changed: the training rules' (copycat starts at seed 0, diagnostics use --diag_skip)
+    assert archived and all("copy_last" not in a and "-diag-" not in a for a in archived)
+    assert "t-smoke-eval-base-counter_last" in archived and (exp / "runs/t-smoke-eval-base-copy_last").exists()
+
+    retrained = pipeline("--eval_skip", "60000", "--lr", "3e-4", "--redo_from", "sft")
     assert retrained.returncode == 0, retrained.stdout[-3000:]
-    assert "previous SFT folder is kept" in retrained.stdout and list(exp.glob("sft.replaced-*"))
+    assert "previous SFT folder is kept" in retrained.stdout and list(exp.glob("sft.replaced-*")) and list(exp.glob("sft-random.replaced-*"))
     assert calls() == ["(fresh)"]  # a fresh training folder: no resume, no clean
     new_arm = json.loads((exp / "summary.json").read_text())["sft_arm"]
     assert new_arm != summary["sft_arm"]  # a new adapter is evaluated afresh, under its own name
-    assert pipeline("--lr", "3e-4").returncode == 0
 
 
 def test_shared_key_value_layers_serve_the_trained_values(tmp_path, monkeypatch):
@@ -382,3 +400,124 @@ def test_shared_key_value_layers_serve_the_trained_values(tmp_path, monkeypatch)
     unfixed = served_slots(5)
     assert unfixed.lora_b[2] is None
     assert not torch.allclose(w_k @ x, trained_key, atol=0.5, rtol=0.02)
+
+
+# --- second review: adapter checks, diagnostics, the random control ------------------------------------------
+
+def test_the_adapter_check_fails_when_it_cannot_run(tmp_path):
+    from fake_runs import write_run  # noqa: F401  (a dataset folder is all the check reads before the server)
+    data = tmp_path / "data" / "dataset"
+    data.mkdir(parents=True)
+    (data / "train.jsonl").write_text(json.dumps({"prompt": [{"role": "user", "content": "hi"}],
+                                                  "completion": [{"role": "assistant", "content": "<answer>rock</answer>"}]}) + "\n")
+    args = ["python", "scripts/expert_iteration/check_adapter.py", "--base_url", "http://127.0.0.1:9/v1", "--base_model",
+            "google/gemma-4-31b-it", "--adapter_name", "a", "--data_dir", str(tmp_path / "data"), "--out", str(tmp_path / "check.json")]
+    failed = run(*args, "--require_improvement")
+    assert failed.returncode == 1 and "could not run" in failed.stdout
+    assert json.loads((tmp_path / "check.json").read_text()) | {"error": ""} == {"ran": False, "bypassed": False, "error": ""}
+    bypassed = run(*args, "--allow_unchecked")
+    assert bypassed.returncode == 0 and "UNCHECKED" in bypassed.stdout
+    assert json.loads((tmp_path / "check.json").read_text())["bypassed"] is True
+
+
+def test_the_export_fidelity_check_catches_a_lost_update(tmp_path, monkeypatch):
+    import torch
+    from safetensors.torch import load_file, save_file
+    from torch.distributed.checkpoint import save
+
+    import vllm.lora.lora_model as vllm_lora_model
+    from expert_iteration.export_lora_adapter import read_adapter, verify_export
+
+    monkeypatch.setattr(vllm_lora_model, "PIN_MEMORY", False)
+    model = {}
+    for layer, projs in {0: ("q_proj", "k_proj", "v_proj"), 5: ("q_proj", "k_proj")}.items():
+        for proj in projs:
+            module = f"model.language_model.layers.{layer}.self_attn.{proj}"
+            model[f"{module}.lora_A.0"], model[f"{module}.lora_B.0"] = torch.randn(8, 32), torch.randn(24, 8)
+    save({"app": {"model": model}}, checkpoint_id=str(tmp_path / "ckpt"))
+    assert export(tmp_path / "ckpt", tmp_path / "adapter", 8).returncode == 0
+    fidelity = json.loads((tmp_path / "adapter/fidelity.json").read_text())
+    assert fidelity["modules_checked"] == 6 and fidelity["max_relative_error"] < 0.03  # 5 modules + the shared V slot
+    trained = read_adapter(ckpt=tmp_path / "ckpt", rank=8, dtype=None)
+    shared = ["model.language_model.layers.5.self_attn.v_proj"]
+    adapter = load_file(tmp_path / "adapter/adapter_model.safetensors")
+    for which in ("A", "B"):  # an export without the shared copy
+        del adapter[f"model.language_model.layers.5.self_attn.v_proj.lora_{which}.weight"]
+    save_file(adapter, str(tmp_path / "adapter/adapter_model.safetensors"))
+    lost = verify_export(out_dir=tmp_path / "adapter", trained=trained, shared=shared, rank=8, alpha=16,
+                         targets=["k_proj", "q_proj", "v_proj"])
+    assert lost["worst"] == shared[0] and lost["max_relative_error"] == float("inf")
+
+
+def play_diag(*, moves, **config):
+    game = HiddenRuleRPSGame(game_config={"seed": 2, "rounds": len(moves), "rule": "copy_last", **config})
+    model = MovesModel(moves=[m for i, m in enumerate(moves) if str(i) not in game.state["forced"]])
+    runner = Runner(game=game, models={"player": model})
+    asyncio.run(runner.run())
+    return runner, model
+
+
+def test_shuffled_dialogue_keeps_the_claims_and_frees_the_phrases():
+    runner, _ = play_diag(moves=["rock"] * 12, dialogue="shuffled")
+    lines = [h["opponent_says"] for h in runner.game.state["history"]]
+    assert all(line.startswith("I will play") for line in lines[3::4])  # claims stay on their rounds
+    generic = [line for i, line in enumerate(lines) if i % 4 != 3]
+    assert all(not line.startswith("I will play") for line in generic)
+    cycled, _ = play_diag(moves=["rock"] * 12)
+    assert generic != [line for i, line in enumerate(h["opponent_says"] for h in cycled.game.state["history"]) if i % 4 != 3]
+
+
+def test_interventions_force_moves_without_asking_and_show_them():
+    runner, model = play_diag(moves=["rock"] * 10, interventions=2)
+    forced = runner.game.forced_rounds()
+    assert len(forced) == 2 and all(1 <= r <= 7 for r in forced)
+    history = runner.game.state["history"]
+    for r in forced:
+        assert history[r]["player"] == runner.game.state["forced"][str(r)]
+        assert history[r + 1]["opponent"] == history[r]["player"]  # the copycat copies the forced move
+    sources = [e["source"] for e in runner.record if e["kind"] == "action" and e["action"] != "THINK"]
+    assert sources.count("forced") == 2 and len(model.moves) == 0  # the model was never asked those rounds
+
+
+def test_a_rule_switch_and_the_lag_three_rule():
+    rotation = ["rock"]
+    while len(rotation) < 12:
+        rotation.append(BEATEN_BY[rotation[-1]])
+    runner, _ = play_diag(moves=rotation, switch_round=6, rule_after="counter_last")
+    winners = [h["winner"] for h in runner.game.state["history"]]
+    assert set(winners[1:6]) == {"player"} and set(winners[6:]) == {None}  # the rotation stops working at the switch
+    history = play(rule="copy_three_back", moves=["rock", "paper", "scissors", "paper", "rock"]).game.state["history"]
+    assert [h["opponent"] for h in history[3:]] == ["rock", "paper"]
+    with pytest.raises(ValueError, match="go together"):
+        HiddenRuleRPSGame(game_config={"seed": 0, "rounds": 4, "rule": "copy_last", "switch_round": 2})
+
+
+def test_diagnostic_scores_leave_out_forced_rounds():
+    from expert_iteration.summarize import diagnostic_metrics
+    runner, _ = play_diag(moves=["rock"] * 10, interventions=2, switch_round=5, rule_after="counter_last")
+    game = {"record": runner.record, "game_config": runner.game.game_config}
+    metrics = diagnostic_metrics(game=game)
+    forced = set(runner.game.forced_rounds())
+    won = [h["winner"] == "player" for h in runner.game.state["history"]]
+    scored = [w for i, w in enumerate(won) if i >= 1 and i not in forced]
+    assert metrics["rounds_won"] == sum(scored) / len(scored)
+    after = [won[j] for r in forced for j in (r + 1, r + 2) if j < len(won) and j not in forced]
+    assert metrics["recovery"] == sum(after) / len(after)
+    assert metrics["won_after_switch"] == sum(w for i, w in enumerate(won) if i >= 5 and i not in forced) / len(
+        [i for i in range(5, 10) if i not in forced])
+
+
+def test_the_random_control_matches_counts_from_the_same_games(tmp_path):
+    runs = {rule: make_run(tmp_path=tmp_path, name=f"gen-{rule}", rule=rule, games=winning_games(rule=rule, n=3) + [["rock"] * 6] * 3)
+            for rule in ("counter_last", "beaten_by_last", "copy_two_back", "repeat_self", "cycle")}
+    common = ["--window", "1", "--min_window", "1", "--thresholds", "1.0", "--target_max", "40", "--val_fraction", "0"]
+    meta, _, _ = select(*runs.values(), out=tmp_path / "success", extra=common)
+    control = run("python", "scripts/expert_iteration/select_sft_data.py", *sum((["--runs", str(r)] for r in runs.values()), []),
+                  "--out_dir", str(tmp_path / "control"), "--mode", "random", "--match_dir", str(tmp_path / "success"),
+                  "--hard_min", "0", "--val_fraction", "0")
+    assert control.returncode == 0, control.stderr
+    control_meta = [json.loads(line) for line in (tmp_path / "control/meta/train.jsonl").open()]
+    assert Counter((m["rule"], m["call"]) for m in control_meta) == Counter((m["rule"], m["call"]) for m in meta)
+    assert any(not m["won"] for m in control_meta)  # drawn whatever the outcome
+    stats = json.loads((tmp_path / "control/stats.json").read_text())
+    assert stats["mode"] == "random" and stats["shortfall"] == {} and stats["matched_train_tokens"] > 0

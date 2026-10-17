@@ -9,8 +9,14 @@ completion are sent as token ids to /v1/completions with prompt_logprobs; the co
 mean negative log-likelihood is computed under both models. An adapter that changes nothing (every
 difference below 1e-4 nats) is not being applied: exit 1. With --require_improvement, an adapter
 whose likelihood of its own training data is not higher than the base model's also exits 1 (a
-trained adapter that serves correctly should lower it). If the check itself cannot run (an API
-mismatch, a server error), it says so and exits 0: it is a guard, not a gate on its own bugs.
+trained adapter that serves correctly should lower it). If the check cannot run (an API
+mismatch, a server or tokenizer error) it also exits 1: an unvalidated adapter must not be
+evaluated by default. --allow_unchecked turns that into a warning, recorded as "bypassed" in the
+output file (and by the pipeline in its summary).
+
+This shows the served adapter changes predictions in the trained direction. Whether the export
+reproduces the trained update exactly is checked separately, at export time, against the
+checkpoint itself (export_lora_adapter.py).
 """
 
 import json
@@ -52,7 +58,8 @@ def completion_nll(*, base_url: str, model: str, prompt_ids: list[int], completi
 @click.option("--out", required=True, type=click.Path(path_type=Path))
 @click.option("--n", default=24)
 @click.option("--require_improvement", is_flag=True)
-def main(base_url, base_model, adapter_name, data_dir, out, n, require_improvement):
+@click.option("--allow_unchecked", is_flag=True, help="Continue (recorded as bypassed) when the check cannot run.")
+def main(base_url, base_model, adapter_name, data_dir, out, n, require_improvement, allow_unchecked):
     try:
         from transformers import AutoTokenizer
 
@@ -68,9 +75,12 @@ def main(base_url, base_model, adapter_name, data_dir, out, n, require_improveme
             tuned = completion_nll(base_url=base_url, model=adapter_name, prompt_ids=prompt_ids, completion_ids=completion_ids)
             results.append({"base_nll": base, "adapter_nll": tuned, "tokens": len(completion_ids)})
     except Exception as error:  # noqa: BLE001 - see the module docstring
-        print(f"WARNING: the adapter check could not run ({error!r}); continuing without it")
-        out.write_text(json.dumps({"ran": False, "error": repr(error)}, indent=1))
-        return
+        out.write_text(json.dumps({"ran": False, "bypassed": allow_unchecked, "error": repr(error)}, indent=1))
+        if allow_unchecked:
+            print(f"WARNING: THE ADAPTER CHECK COULD NOT RUN ({error!r}); continuing UNCHECKED (--allow_unchecked)")
+            return
+        print(f"Error: the adapter check could not run ({error!r}); fix it, or pass --allow_unchecked to continue unchecked")
+        sys.exit(1)
     mean = lambda key: sum(r[key] for r in results) / len(results)
     differences = [abs(r["base_nll"] - r["adapter_nll"]) for r in results]
     summary = {

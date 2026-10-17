@@ -33,10 +33,21 @@ The always-rotate column is checked in `tests/test_expert_iteration.py`. Three o
 |---|---|---|
 | 1 | generate | vLLM serves base gemma-4-31b-it, data-parallel over both GPUs. 200 games × 20 rounds against each of the 5 training rules (1,000 games). Sampled at T=1.0, top_p 0.95, top_k 64, max 2,048 tokens. Standard prompts, no forecasts, seeds 0–199. |
 | 2 | select | `select_sft_data.py`; details below. |
-| 3 | sft | LoRA SFT with prime-rl (`make_sft_config.py`): rank 16, alpha 32, lr 1e-4 cosine, 1 epoch, seq_len 8,192, 16 packed rows per step, both GPUs. Gemma-4 needs the `gemma4` renderer and the fused LM head off. The frozen base and the LoRA weights are held in bfloat16, as in prime-rl's LoRA example. A checkpoint is saved every quarter of the run (at least every 25 steps); only the latest is kept. |
-| 4 | export | `export_lora_adapter.py`: reads only the LoRA tensors from the DCP checkpoint and writes the adapter as prime-rl's own adapter broadcast does (`adapter_model.safetensors` + `adapter_config.json`). prime-rl has no exporter for SFT checkpoints. **Shared key/value layers:** gemma-4's 10 full-attention layers (5, 11, …, 59) have no `v_proj`, because their values are the `k_proj` output. vLLM loads `k_proj` into both the K and V slots but applies LoRA per slot, so the `k_proj` adapter is also written as `v_proj` for exactly those layers. Otherwise the served values would lack the trained update. |
-| 5 | evaluate | One vLLM server with the base model plus the adapter. First, `check_adapter.py` compares base and adapter likelihoods on training examples through the server. It stops the run if the adapter changes nothing, or (full run) if it doesn't make its own training data more likely. Then greedy (T=0) evaluation of both models. **10 rounds:** held-out copycat, 100 games on seeds 0–99 (the same condition as the earlier B0 primary baseline, 43.9% of rounds 2–10 won); each training rule, 40 games on fresh seeds 50,000–50,039, never used for training. **20 rounds:** copycat, 50 games; each training rule, 20 games. The adapter is named and evaluated under a hash of its weights. |
-| 6 | summarize | `summarize.py` pairs base and SFT game by game on seeds, per rule and horizon, with the strict checks (complete, same condition except the model). It adds round-by-round win rates to tell faster discovery from better early moves. Writes `summary.md` and `summary.json`. |
+| 3 | control | With `--control random` (default): an equally sized control dataset from the **same training games**. Random round-2+ calls are taken whatever their outcome, matched count for count per opponent and call kind (`select_sft_data.py --mode random`). It tests whether the success filter adds anything beyond exposure to the task. |
+| 4 | sft | Once per arm (`sft`: selected data; `rand`: control data, with the same number of steps). LoRA SFT with prime-rl (`make_sft_config.py`): rank 16, alpha 32, lr 1e-4 cosine, 1 epoch, seq_len 8,192, 16 packed rows per step, both GPUs. Gemma-4 needs the `gemma4` renderer and the fused LM head off. The frozen base and the LoRA weights are held in bfloat16, as in prime-rl's LoRA example. A checkpoint is saved every quarter of the run (at least every 25 steps); only the latest is kept. |
+| 5 | export | Per arm. `export_lora_adapter.py`: reads only the LoRA tensors from the DCP checkpoint and writes the adapter as prime-rl's own adapter broadcast does (`adapter_model.safetensors` + `adapter_config.json`). prime-rl has no exporter for SFT checkpoints. **Shared key/value layers:** gemma-4's 10 full-attention layers (5, 11, …, 59) have no `v_proj`, because their values are the `k_proj` output. vLLM loads `k_proj` into both the K and V slots but applies LoRA per slot, so the `k_proj` adapter is also written as `v_proj` for exactly those layers. Otherwise the served values would lack the trained update. **Fidelity check:** after writing, the adapter is reloaded with vLLM's own loader, and every module's update, including the shared V slots, is compared with the checkpoint's on identical random inputs. A mismatch fails the export (`fidelity.json`). |
+| 6 | evaluate | One vLLM server with the base model plus both adapters. First, `check_adapter.py` compares base and each adapter's likelihood of that adapter's training examples through the server. It stops the run if an adapter changes nothing, if (full run) it doesn't make its training data more likely, or if the check can't run (`--allow_unchecked` overrides this, recorded as bypassed). Then greedy (T=0) evaluation of both models. **10 rounds:** held-out copycat, 100 games on seeds 0–99 (the same condition as the earlier B0 primary baseline, 43.9% of rounds 2–10 won); each training rule, 40 games on fresh seeds 50,000–50,039, never used for training. **20 rounds:** copycat, 50 games; each training rule, 20 games. **Diagnostic suite** (30 games per condition, 20 rounds, seeds 70,000+, frozen before training), listed below. Each adapter is named and evaluated under a hash of its weights. |
+| 7 | summarize | `summarize.py` pairs runs game by game on seeds, per rule, horizon and diagnostic condition, with the strict checks (complete, same condition except the model). Diagnostics are scored without round 1 and without forced rounds, and add recovery and before/after-switch rates; there are round-by-round win rates throughout. Bootstrap 95% intervals are taken over games. Outputs: `summary.md` (sft vs base), `summary-rand.md` (rand vs base) and `summary-sft-vs-rand.md` (does the success filter matter), each with a `.json`. |
+
+**The diagnostic suite** (hidden-rule game options, `self_play/games/hidden_rule_rps/game.py`):
+
+| Condition | Settings | What it separates |
+|---|---|---|
+| shuffled phrases (copycat) | the generic lines are drawn at random each round, not tied to the round; the move claims stay on their rounds | play that depends on which phrase precedes which move |
+| forced moves (copycat) | 2 seeded rounds where the player's move is forced; the history shows it; scored without them | recovery after an unexpected history. "Always beat my own last move" survives this, so it isn't enough alone |
+| rule switch | copycat, then an unannounced switch to counter_last at round 11 | a memorized rotation (draws after the switch) from adapting to the opponent |
+| lag-3 (held out) | the opponent copies the player's move from 3 rounds ago; never trained on | discovery of an unseen reactive rule |
+| shuffled phrases (counter_last) | as above, on a training rule | the same phrase dependence where the success data had it |
 
 ### Data selection: what counts as "good"
 
@@ -73,22 +84,25 @@ bash scripts/run_expert_iteration.sh                 # the full experiment
 
 - **Where outputs go:** everything lands in `$storage_dir/expert_iteration/<name>/` (default name `ei-v1`; the smoke run is `ei-v1-smoke`), in `configs/`, `runs/`, `data/`, `sft/`, `adapter/`, `logs/` and `stages/`. The result is `summary.md`.
 - **Resuming:** run the same command again. Finished stages are skipped and unfinished evaluation runs resume. An interrupted SFT resumes from its latest checkpoint, or restarts clean if it never saved one.
-- **Rerunning part:** `--redo_from <stage>` reruns that stage and everything after it. Redoing SFT, or anything before it, moves the old training folder to `sft.replaced-<time>/` rather than deleting it; delete that folder yourself to free its ~65 GB checkpoint.
+- **Rerunning part:** `--redo_from <stage>` reruns that stage and everything after it. Redoing SFT, or anything before it, moves the old training folders to `sft.replaced-<time>/` and `sft-random.replaced-<time>/` rather than deleting them; delete them yourself to free ~65 GB each. Runs of a redone stage whose condition changed are moved to `runs/archive/`; runs whose condition didn't change are reused.
 - **Stopping early:** `--stop_after <stage>` stops successfully once that stage is done. For example, `--stop_after select` generates and selects data, then frees the GPUs. Rerun without the flag to continue.
-- **Changing settings:** a finished stage keeps its settings (`stages/<stage>.params`). Changing one of them is refused unless you redo that stage with `--redo_from`. Settings for stages that haven't run yet can change freely.
+- **Changing settings:** a stage's settings are recorded when it **starts** (`stages/<stage>.params`). Changing one of them afterwards, even for an interrupted stage, is refused unless you redo that stage with `--redo_from`. Settings for stages that never started can change freely.
 - **Every setting is a flag**, e.g. `--gen_games`, `--target_min`, `--lr`, `--epochs`, `--lora_rank` and `--eval_games`. See the script header.
 
 **Time estimate for the full run.** Per-call latencies come from the B0 primary run (about 8 s per call at 10 games in flight per GPU).
 
 | Stage | Estimate |
 |---|---|
-| generate | ~7 h (50,000 calls) |
-| SFT | ~2–3 h (about 25M tokens) |
-| evaluate | ~1.5 h |
+| generate | ~7 h, 50,000 calls (done for `ei-v1`: 6 h 50 min) |
+| control | minutes (CPU) |
+| SFT | ~2–3 h per arm, about 9M tokens each; ~4–6 h for both |
+| evaluate | ~7–8 h: 3 models × (7,500 calls at 10 rounds + 7,500 at 20 rounds + 7,500 diagnostic) |
 | server starts | ~10 min each |
-| **Total** | **about 11–12 h** |
+| **Remaining for `ei-v1`** | **about 12–14 h** |
 
-Disk use is about 65 GB for the SFT checkpoint, which holds the whole model, plus a few GB of traces.
+To shorten evaluation, drop the 20-round evaluation (`--eval_long_games 0`) or use fewer diagnostic games (`--diag_games 20`). Both are evaluate-stage settings, free to change until evaluation starts.
+
+Disk use is about 65 GB per SFT checkpoint (two arms), since each holds the whole model, plus a few GB of traces.
 
 ## What was verified, and what only your GPUs can verify
 
@@ -115,41 +129,44 @@ Disk use is about 65 GB for the SFT checkpoint, which holds the whole model, plu
 
 Generation took about 6 h 50 min (01:55–08:45 PDT): 1,000 games, 0 errors, and 39 of about 50,000 replies hit the token limit (dropped). Selection was strict (0.8):
 
-| Opponent rule | Rounds that qualify (random play: 3.7%) | Train examples | From games | Share |
-|---|---|---|---|---|
-| repeat_self | 93.1% | 2,622 (capped) | 190 | 35.0% |
-| cycle | 82.6% | 2,622 (capped) | 187 | 35.0% |
-| beaten_by_last | 26.6% | 1,489 | 134 | 19.9% |
-| counter_last | 8.9% | 451 | 75 | 6.0% |
-| copy_two_back | 4.8% | 308 | 77 | 4.1% |
-| **Total** | | **7,492** (+ 388 validation) | 663 | |
+| Opponent rule | Rounds won, 2–20 | Rounds won, 11–20 | Rounds passing the filter (random play: 3.7%) | Train examples | From games | Share |
+|---|---|---|---|---|---|---|
+| repeat_self | 94.4% | 100.0% | 93.1% | 2,622 (capped) | 190 | 35.0% |
+| cycle | 87.0% | 99.6% | 82.6% | 2,622 (capped) | 187 | 35.0% |
+| beaten_by_last | 50.0% | 68.1% | 26.6% | 1,489 | 134 | 19.9% |
+| counter_last | 39.3% | 44.0% | 8.9% | 451 | 75 | 6.0% |
+| copy_two_back | 36.7% | 39.5% | 4.8% | 308 | 77 | 4.1% |
+| **Total** | | | | **7,492** (+ 388 validation) | 663 | |
+
+The "passing the filter" column measures the selection window (a won round followed by ≥80% wins), not the win rate. The win-rate columns are the base model's actual play. A review confirmed: 7,492 examples from 663 training games, strict metadata, the share cap on the final set, and no game or exact example shared between training and validation.
 
 That's 8.8M tokens, with the longest example at 3,197 tokens. The run is `diversity_limited`: the two easy rules hit the 35% cap.
 
-- **The base model already solves the rules that don't depend on its own moves** (93% and 83%).
-- **On beaten_by_last it often wins** (27%). Repeating its last move beats that rule, and "stick with what won" is a common heuristic, so these wins may not reflect inference.
-- **It is near chance on copy_two_back** (4.8%, against 3.7% for random play), and only modestly above chance on counter_last.
+- **The base model already handles the two rules that don't react to it**: about 100% of rounds 11–20 against repeat_self and cycle.
+- **Its weakness is recognizing how its own moves drive the opponent.** It wins 68% of late rounds against beaten_by_last, where repeating its last move wins, a common "stick with what won" heuristic. It wins about 40% against counter_last and copy_two_back, close to chance.
 
 So the data that could teach "model the opponent as a function of my own moves" is the thinnest: 759 examples from 152 games. That is the honest limit of one round of expert iteration on this base model.
 
-**What the selected reasoning says.** The table below comes from keyword counts over the 3,747 selected move replies, so treat it as rough:
+**What the selected reasoning says, and what it doesn't.** An earlier version of this report concluded from keyword counts that SFT on this data would "most likely teach stronger superstitions". That overstated the evidence:
+- **The counts are crude.** About half the selected move replies mention the opponent's phrases, and very few mention the player's own past moves. But some mention phrases only to reject them before correctly identifying a cycle or a constant move.
+- **There are examples of correct reactive-rule inference.** For instance, training example 1837 (counter_last) states "they play the move that beats my previous move", supports it with accurate history, and plays the winning counter.
+- **The ~75% copycat ceiling applies only to a fixed period-4 action policy,** not to every reply that mentions phrases.
+- **Reasoning text is imperfect evidence** of what drives behavior (Turpin et al., 2023).
 
-| Rule | Moves | Phrase-based ("the history for this phrase…") | About the player's own past moves | Cycle or sequence |
-|---|---|---|---|---|
-| beaten_by_last | 745 | 89% | 0% | 10% |
-| copy_two_back | 154 | 76% | 3% | 45% |
-| counter_last | 226 | 73% | 14% | 29% |
-| cycle | 1,311 | 36% | 4% | 93% |
-| repeat_self | 1,311 | 52% | 1% | 19% |
-| **all** | 3,747 | **56%** | **3%** | 45% |
+What can be said: the data is 70% the two non-reactive rules, and the reactive rules where the base model is weakest contribute only 759 examples.
 
-Even on the rules that depend on the player's own moves, the reasoning that won is mostly the phrase superstition seen in the baselines. That superstition wins because the opponent's lines repeat every 4 rounds, and the copy-style opponents turn a consistent superstition into a self-confirming pattern. Outcome filtering selects reasoning that *won*, not reasoning that *understood*. SFT on this data will most likely teach these superstitions more firmly. Against copycat, phrase-based play is capped at about 75% of rounds (period 4 against a rule that needs period 3; see the copycat baseline report), so a gain there would not show discovery.
+**A concrete shortcut risk:** 35% of the data is `cycle`. Beating a cycling opponent and beating copycat can both be done by a fixed rotation. So holding copycat out of training does not by itself make a copycat gain evidence of discovery. The diagnostic suite exists for this: the rule switch, the lag-3 held-out rule, and shuffled phrases.
 
-Options before spending GPU time on SFT:
-1. **Run SFT on this data anyway, as a pilot.** It answers "what does outcome-filtered self-imitation teach here?" in about 4–5 h; the expected answer is "stronger superstitions".
-2. **Remove the spurious cue and regenerate.** Make the opponent's lines uninformative (silent, or not tied to a 4-round cycle) for generation and evaluation, then rerun. Your plan treats speech as a separate observation-distribution ablation, so this would be a new condition with its own baseline.
-3. **Supervise opponent prediction (variant B).** Train on what the opponent actually did next, a signal that doesn't depend on winning for the wrong reason.
-4. **Run the control the review suggests.** SFT on equally sized, randomly selected data tests whether the success filter adds anything.
+**The random control is less different than its name suggests.** Matched per opponent and call kind, 77% of its examples come from won rounds and 60% would pass the strict filter, because the easy rules are mostly won anyway. Its contrast with the selected data is concentrated in the reactive rules.
+
+## Plan (agreed with the second review)
+
+1. Run the GPU smoke test: `bash scripts/run_expert_iteration.sh --smoke true`. It confirms training, checkpoint recovery, export and its fidelity check, LoRA serving, and the adapter check.
+2. Keep the evaluation frozen as above: the original 10- and 20-round conditions plus the diagnostic suite, with the same conditions and seeds for every model.
+3. Train on the current strict dataset as the pilot, and report its composition as a limitation.
+4. Train the random-data control (same games, matched proportions and steps) and compare base, outcome-selected SFT and random SFT. If both SFT models improve similarly, the gain comes from task exposure, not from the success filter.
+5. **Next iteration, not yet built:** select candidates more robustly. Sample several replies from the same history, score each across several continuations (varied phrases, occasional forced moves), and keep those that do consistently well downstream, using future outcomes only for scoring. All branches from one history stay in the same split.
+6. Opponent-prediction training (variant B) is deferred: it can reward the same shortcuts when histories carry the same correlations.
 
 ## Review fixes (after `8cfbf57`)
 
@@ -161,9 +178,18 @@ Options before spending GPU time on SFT:
 | 4 | Trimming to the target could drop whole rules alphabetically, while the report claimed otherwise. | The budget is allocated across rules up front, and reported counts come from the written files. |
 | Design | Strict and relaxed selection should stay distinguishable; count unique games; evaluate adaptation over time. | Strict-only by default; `meta.strict` on every example; unique games per rule; random-play pass rates beside the observed rates; a 20-round evaluation with round-by-round win rates. Settings are now kept per stage, so a finished stage's settings are protected while later ones can change. |
 
+### Third review (after `9923806`)
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | The adapter check passed when it couldn't run, and showed only that the adapter has *an* effect. | It now fails when it can't run; `--allow_unchecked` overrides this, recorded as `bypassed`. Export fidelity is checked at export time: vLLM's loader reloads the adapter, and every module's update is compared with the checkpoint's on identical inputs, shared V slots included. |
+| 2 | An interrupted SFT could resume under changed settings. | A stage's settings are recorded when it starts and protected from then on; changing them needs `--redo_from`. |
+| 3 | `--redo_from evaluate` with changed settings failed on the old runs' identity check. | A redone stage moves its runs of an older condition to `runs/archive/` and reruns them; runs whose condition is unchanged (the copycat and diagnostic runs, when only `--eval_skip` changed) are reused. |
+| Design | Stronger evaluation before training; a random-data control; a tempered interpretation. | The diagnostic suite (shuffled phrases, forced moves, a rule switch, a held-out lag-3 rule); a random-data control arm trained for the same steps; the report's interpretation corrected, with actual win rates added. |
+
 **Still open, as the review notes:**
 - A gain on held-out copycat alone doesn't establish general pattern discovery. More held-out rules and action-intervention tests would strengthen that claim.
-- An SFT control on equally sized, randomly selected data would test whether the success filter adds value.
+- More robust candidate selection (step 5 of the plan above).
 
 ## Caveats
 

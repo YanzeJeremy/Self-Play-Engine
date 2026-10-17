@@ -5,7 +5,10 @@
 
 Prints one line per config: "<rule> <config path>". The rule copy_last is written as the
 standard "copycat_rps" game (the same game; its results compare directly with earlier copycat
-baselines), every other rule as "hidden_rule_rps". Seeds are skip..skip+N-1: generation uses
+baselines), every other rule as "hidden_rule_rps". --extra adds diagnostic game settings
+(hidden_rule_rps options such as dialogue, interventions, switch_round/rule_after, as JSON);
+with them, copy_last is written as hidden_rule_rps too (copycat_rps has no such options).
+Seeds are skip..skip+N-1: generation uses
 seeds from 0, evaluation of the training rules uses fresh seeds (--skip), so no evaluated game
 was ever played for training data. Prompts never change: prediction_mode stays off.
 """
@@ -42,7 +45,7 @@ prediction_mode = "off"
 
 [env.game_config]
 rounds = {rounds}
-{rule_line}
+{rule_line}{extra_lines}
 [env.taskset]
 id = "self-play-verifiers"
 """
@@ -63,19 +66,25 @@ id = "self-play-verifiers"
 @click.option("--max_tokens", default=2048, type=int)
 @click.option("--max_concurrent", default=4, type=int)
 @click.option("--tag", default="", help="Appended to config file names (e.g. the model being evaluated).")
-def main(out_dir, kind, model, rules, games, copycat_games, rounds, skip, temperature, top_p, top_k, max_tokens, max_concurrent, tag):
+@click.option("--extra", default="{}", help='Extra game_config settings as JSON, e.g. \'{"dialogue": "shuffled"}\'.')
+def main(out_dir, kind, model, rules, games, copycat_games, rounds, skip, temperature, top_p, top_k, max_tokens, max_concurrent, tag, extra):
+    import json
+
+    extra = json.loads(extra)
+    toml_value = lambda v: json.dumps(v) if isinstance(v, str) else str(v).lower() if isinstance(v, bool) else str(v)
+    extra_lines = "".join(f"{key} = {toml_value(value)}\n" for key, value in sorted(extra.items()))
     out_dir.mkdir(parents=True, exist_ok=True)
     for rule in [r.strip() for r in rules.split(",") if r.strip()]:
         if rule not in RULES:
             raise click.BadParameter(f"unknown rule {rule!r}; known: {sorted(RULES)}")
-        copycat = rule == "copy_last"
+        copycat = rule == "copy_last" and not extra
         text = TEMPLATE.format(
             kind=kind, rule=rule, model=model, max_concurrent=max_concurrent,
             games=copycat_games if copycat and copycat_games else games,
             skip=0 if copycat else skip,
             temperature=temperature, top_p=top_p, top_k=top_k, max_tokens=max_tokens,
             game="copycat_rps" if copycat else "hidden_rule_rps", rounds=rounds,
-            rule_line="" if copycat else f'rule = "{rule}"\n',
+            rule_line="" if copycat else f'rule = "{rule}"\n', extra_lines=extra_lines,
         )
         path = out_dir / f"{kind}_{rule}{'_' + tag if tag else ''}.toml"
         path.write_text(text)
